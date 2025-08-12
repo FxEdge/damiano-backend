@@ -1,4 +1,13 @@
 # FastAPI backend per progetto Damiano (minimo ma completo)
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://damiano-frontend.onrender.com"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Endpoints: /health, /auth/login, /records (CRUD), /emails/sent
 # Password iniziale: "demo"
 
@@ -172,3 +181,4 @@ def emails_sent():
         {"to":"sara.bianchi@example.com","subject":"Aggiornamento","sent_at":"2025-08-05T15:30:00Z","status":"ok"}
     ])
     return {"emails": sample}
+
