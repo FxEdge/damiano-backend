@@ -1,9 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-app = FastAPI()
+app = FastAPI(title="Damiano API")
 
-# CORS aperto per test. Poi limita a: ["https://damiano-frontend.onrender.com"]
+# Per test lascia "*". Poi limita a: ["https://damiano-frontend.onrender.com"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,6 +13,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---- MODELS ----
+class LoginRequest(BaseModel):
+    email: str | None = None
+    password: str
+
+class LoginResponse(BaseModel):
+    token: str
+
+# ---- ROUTES ESISTENTI ----
 @app.get("/")
 def root():
     return {"status": "ok", "service": "damiano-backend"}
@@ -27,4 +37,7 @@ def healthz():
 @app.get("/api/ping")
 def ping():
     return {"pong": True}
+
+# ---- AUTH (NUOVO) ----
+@app.post("/auth/login", response
 
