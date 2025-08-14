@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Apri CORS per test (poi restringiamo al tuo dominio frontend)
+# CORS aperto per test. Dopo sostituisci "*" con:
+# ["https://damiano-frontend.onrender.com"]  (o il tuo dominio)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,6 +13,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "damiano-backend"}
+
+@app.get("/health")
+def health_plain():
+    return "ok"
+
 @app.get("/healthz")
-def health():
-    return {"ok": True}
+def h
