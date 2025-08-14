@@ -39,5 +39,10 @@ def ping():
     return {"pong": True}
 
 # ---- AUTH (NUOVO) ----
-@app.post("/auth/login", response
+@app.post("/auth/login", response_model=LoginResponse)
+def login(body: LoginRequest):
+    # password iniziale: demo
+    if body.password != "demo":
+        raise HTTPException(status_code=401, detail="Credenziali non valide")
+    return {"token": "damiano-token"}
 
