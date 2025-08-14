@@ -1,16 +1,4 @@
-# FastAPI backend per progetto Damiano (minimo ma completo)
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://damiano-frontend.onrender.com"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-# Endpoints: /health, /auth/login, /records (CRUD), /emails/sent
-# Password iniziale: "demo"
-
+# main.py
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
@@ -52,6 +40,7 @@ def _ensure_auth():
         data["password_sha"] = _sha("demo")
         _save_json(AUTH_PATH, data)
     return data
+
 _ensure_auth()
 
 # === MODELS ===
@@ -70,7 +59,6 @@ class Record(BaseModel):
     id: Optional[str] = None
     nome: str = ""
     cognome: str = ""
-    # campi aggiuntivi già pronti per il tuo modulo
     data_nascita: Optional[str] = None   # ISO YYYY-MM-DD
     stato_civile: Optional[str] = None
     indirizzo1: Optional[str] = None
@@ -86,10 +74,10 @@ class Record(BaseModel):
 # === APP ===
 app = FastAPI(title="Damiano API", version=APP_VERSION)
 
-# CORS aperto (così GitHub Pages può chiamare l’API)
+# CORS: limita al tuo frontend su Render
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # in futuro: metti il tuo dominio, es. "https://fxedge.github.io"
+    allow_origins=["https://damiano-frontend.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -114,9 +102,17 @@ def save_records(data: List[dict]):
     _save_json(RECORDS_PATH, data)
 
 # === ENDPOINTS ===
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "damiano-backend"}
+
 @app.get("/health")
 def health():
     return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
+
+@app.get("/api/ping")
+def ping():
+    return {"pong": True}
 
 # --- AUTH ---
 @app.post("/auth/login", response_model=LoginResponse)
@@ -124,19 +120,16 @@ def login(body: LoginRequest):
     auth = _ensure_auth()
     if _sha(body.password) != auth.get("password_sha"):
         raise HTTPException(status_code=401, detail="Credenziali non valide")
-    # token semplice (per demo)
-    return {"token": "damiano-token"}
+    return {"token": "damiano-token"}  # demo token
 
 @app.post("/auth/change-password")
 def change_password(body: ChangePassword):
     auth = _ensure_auth()
     if _sha(body.old_password) != auth.get("password_sha"):
         raise HTTPException(status_code=401, detail="Password attuale errata")
-
-    # regola minima: 8+ caratteri, almeno 1 maiuscola, 1 minuscola, 1 numero, 1 simbolo, no spazi
+    # policy minima
     if not re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])\S{8,}$", body.new_password):
         raise HTTPException(status_code=400, detail="Password non conforme alla policy")
-
     auth["password_sha"] = _sha(body.new_password)
     _save_json(AUTH_PATH, auth)
     return {"ok": True}
@@ -181,4 +174,6 @@ def emails_sent():
         {"to":"sara.bianchi@example.com","subject":"Aggiornamento","sent_at":"2025-08-05T15:30:00Z","status":"ok"}
     ])
     return {"emails": sample}
+
+
 
