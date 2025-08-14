@@ -3,8 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# CORS aperto per test. Dopo sostituisci "*" con:
-# ["https://damiano-frontend.onrender.com"]  (o il tuo dominio)
+# CORS aperto per test. Poi limita a: ["https://damiano-frontend.onrender.com"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,4 +21,10 @@ def health_plain():
     return "ok"
 
 @app.get("/healthz")
-def h
+def healthz():
+    return {"ok": True}
+
+@app.get("/api/ping")
+def ping():
+    return {"pong": True}
+
