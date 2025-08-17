@@ -32,6 +32,10 @@ def _save_json(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+def _norm(s: Optional[str]) -> str:
+    """Normalizza per confronto: toglie spazi e rende minuscolo."""
+    return (s or "").strip().lower()
+
 # === AUTH init (password demo) ===
 def _ensure_auth():
     data = _load_json(AUTH_PATH, {"password_sha": _sha("demo")})
@@ -132,17 +136,17 @@ def create_record(rec: Record):
     data = load_records()
     now = _now_iso()
 
-    # controllo duplicato: stessa persona + stesso defunto
+    # Duplicate se coincidono: persona + defunto (normalizzati)
     for r in data:
         if (
-            r.get("nome") == rec.nome and
-            r.get("cognome") == rec.cognome and
-            r.get("email") == rec.email and
-            r.get("telefono_numero") == rec.telefono_numero and
-            r.get("def_nome") == rec.def_nome and
-            r.get("def_cognome") == rec.def_cognome
-            # Se vuoi includere anche la data del decesso:
-            # and r.get("def_data") == rec.def_data
+            _norm(r.get("nome")) == _norm(rec.nome) and
+            _norm(r.get("cognome")) == _norm(rec.cognome) and
+            _norm(r.get("email")) == _norm(rec.email) and
+            _norm(r.get("telefono_numero")) == _norm(rec.telefono_numero) and
+            _norm(r.get("def_nome")) == _norm(rec.def_nome) and
+            _norm(r.get("def_cognome")) == _norm(rec.def_cognome)
+            # Se vuoi includere anche la data del decesso, togli il commento qui sotto:
+            # and _norm(r.get("def_data")) == _norm(rec.def_data)
         ):
             raise HTTPException(
                 status_code=409,
