@@ -127,22 +127,27 @@ def change_password(body: ChangePassword):
     return {"ok": True}
 
 # --- RECORDS CRUD ---
-@app.get("/records")
-def list_records():
-    return {"records": load_records()}
-
 @app.post("/records")
 def create_record(rec: Record):
     data = load_records()
     now = _now_iso()
 
-    # controllo duplicato (nome + cognome + email + telefono_numero)
+    # controllo duplicato: stessa persona + stesso defunto
     for r in data:
-        if (r.get("nome") == rec.nome and
+        if (
+            r.get("nome") == rec.nome and
             r.get("cognome") == rec.cognome and
             r.get("email") == rec.email and
-            r.get("telefono_numero") == rec.telefono_numero):
-            raise HTTPException(status_code=409, detail="Contatto duplicato")
+            r.get("telefono_numero") == rec.telefono_numero and
+            r.get("def_nome") == rec.def_nome and
+            r.get("def_cognome") == rec.def_cognome
+            # Se vuoi includere anche la data del decesso:
+            # and r.get("def_data") == rec.def_data
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Contatto duplicato (persona + defunto già presente)"
+            )
 
     obj = rec.model_dump()
     obj["id"] = uuid.uuid4().hex
@@ -151,6 +156,7 @@ def create_record(rec: Record):
     data.append(obj)
     save_records(data)
     return obj
+
 
 @app.put("/records/{rid}")
 def update_record(rid: str, rec: Record):
