@@ -13,6 +13,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 RECORDS_PATH = os.path.join(DATA_DIR, "records.json")
 AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
 EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
+EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
+EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
 
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -45,6 +47,37 @@ def _ensure_auth():
     return data
 _ensure_auth()
 
+# === EMAIL SETTINGS/TEMPLATES init ===
+def _ensure_email_files():
+    # Valori ATTIVI (quelli che "si vedono sempre")
+    _load_json(EMAIL_SETTINGS_PATH, {
+        "subject": "In memoria di {{NOME}} {{COGNOME}}",
+        "body": "Gentile {{NOME}} {{COGNOME}},\nTi ricordiamo con affetto in questa ricorrenza."
+    })
+    # Modelli salvati (richiamabili per nome)
+    _load_json(EMAIL_TEMPLATES_PATH, {
+        "subject": [],  # es: [{"id":"...","name":"Damiano1","content":"...","created_at":"..."}]
+        "body": []
+    })
+
+_ensure_email_files()
+def load_email_settings():
+    # Ritorna i valori ATTIVI (quelli che si vedono sempre)
+    return _load_json(EMAIL_SETTINGS_PATH, {"subject": "", "body": ""})
+
+def save_email_settings(data: dict):
+    # Salva i valori ATTIVI
+    _save_json(EMAIL_SETTINGS_PATH, data)
+
+def load_email_templates():
+    # Ritorna i modelli salvati (richiamabili per nome)
+    return _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
+
+def save_email_templates(data: dict):
+    # Salva l’archivio dei modelli
+    _save_json(EMAIL_TEMPLATES_PATH, data)
+
+
 # === MODELS ===
 class LoginRequest(BaseModel):
     email: Optional[EmailStr] = None
@@ -75,6 +108,21 @@ class Record(BaseModel):
 
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    
+class EmailSettingsIn(BaseModel):
+    # Valori ATTIVI (quelli visibili sempre nella pagina)
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    # opzionali: se vuoi tracciare quale modello è attivo
+    subject_template_id: Optional[str] = None
+    body_template_id: Optional[str] = None
+
+class EmailTemplateIn(BaseModel):
+    # Modello salvabile/richiamabile: 'subject' oppure 'body'
+    type: str  # 'subject' | 'body'
+    name: str  # es. "Damiano1"
+    content: str
+
 
 # === APP ===
 app = FastAPI(title="Damiano API", version=APP_VERSION)
@@ -185,5 +233,79 @@ def emails_sent():
         {"to":"sara.bianchi@example.com","subject":"Aggiornamento","sent_at":"2025-08-05T15:30:00Z","status":"ok"}
     ])
     return {"emails": sample}
+# === EMAIL: SETTINGS (valori ATTIVI) ===
+@app.get("/api/email/settings")
+def get_email_settings():
+    s = load_email_settings()
+    return {
+        "subject": s.get("subject", ""),
+        "body": s.get("body", ""),
+        "subject_template_id": s.get("subject_template_id"),
+        "body_template_id": s.get("body_template_id"),
+        "updated_at": s.get("updated_at"),
+    }
+
+@app.put("/api/email/settings")
+def update_email_settings(body: EmailSettingsIn):
+    s = load_email_settings()
+    if body.subject is not None:
+        s["subject"] = body.subject
+    if body.body is not None:
+        s["body"] = body.body
+    if body.subject_template_id is not None:
+        s["subject_template_id"] = body.subject_template_id
+    if body.body_template_id is not None:
+        s["body_template_id"] = body_template_id = body.body_template_id
+    s["updated_at"] = _now_iso()
+    save_email_settings(s)
+    return {"ok": True}
+
+
+# === EMAIL: TEMPLATES (modelli salvati/richiamabili) ===
+@app.get("/api/email/templates")
+def list_email_templates(type: str):
+    """
+    Query string: ?type=subject | body
+    Ritorna la lista dei modelli salvati per il tipo richiesto.
+    """
+    if type not in ("subject", "body"):
+        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
+    alltpl = load_email_templates()
+    return alltpl.get(type, [])
+
+@app.post("/api/email/templates")
+def create_email_template(tpl: EmailTemplateIn):
+    """
+    Crea un nuovo modello (subject/body).
+    Per comodità, lo rende anche 'attivo' aggiornando email_settings.
+    """
+    t = tpl.type
+    if t not in ("subject", "body"):
+        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
+
+    alltpl = load_email_templates()
+    new_item = {
+        "id": uuid.uuid4().hex,
+        "name": tpl.name,
+        "content": tpl.content,
+        "created_at": _now_iso(),
+    }
+    # inserisco in testa alla lista del tipo
+    alltpl.setdefault(t, [])
+    alltpl[t].insert(0, new_item)
+    save_email_templates(alltpl)
+
+    # aggiorno anche i valori ATTIVI
+    s = load_email_settings()
+    if t == "subject":
+        s["subject"] = tpl.content
+        s["subject_template_id"] = new_item["id"]
+    else:
+        s["body"] = tpl.content
+        s["body_template_id"] = new_item["id"]
+    s["updated_at"] = _now_iso()
+    save_email_settings(s)
+
+    return {"id": new_item["id"], "ok": True}
 
 
