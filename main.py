@@ -167,6 +167,7 @@ def login(body: LoginRequest):
     if _sha(body.password) != auth.get("password_sha"):
         raise HTTPException(status_code=401, detail="Credenziali non valide")
     return {"token": "damiano-token"}
+    
     @app.delete("/api/email/templates/{tid}")
 def delete_email_template(tid: str, type: str = Query(..., description="'subject' o 'body'")):
     if type not in ("subject", "body"):
@@ -284,7 +285,8 @@ def update_email_settings(body: EmailSettingsIn):
     if body.subject_template_id is not None:
         s["subject_template_id"] = body.subject_template_id
     if body.body_template_id is not None:
-     s["body_template_id"] = body.body_template_id
+    s["body_template_id"] = body.body_template_id
+
     s["updated_at"] = _now_iso()
     save_email_settings(s)
     return {"ok": True}
