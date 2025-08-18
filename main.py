@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime, timezone
+from fastapi import Query
 import os, json, uuid, hashlib, re
 
 APP_VERSION = "1.1.0"
@@ -166,6 +167,34 @@ def login(body: LoginRequest):
     if _sha(body.password) != auth.get("password_sha"):
         raise HTTPException(status_code=401, detail="Credenziali non valide")
     return {"token": "damiano-token"}
+    @app.delete("/api/email/templates/{tid}")
+def delete_email_template(tid: str, type: str = Query(..., description="'subject' o 'body'")):
+    if type not in ("subject", "body"):
+        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
+
+    # carica archivio modelli
+    tpls = load_email_templates()
+    arr = tpls.get(type, [])
+    new_arr = [x for x in arr if x.get("id") != tid]
+
+    if len(new_arr) == len(arr):
+        raise HTTPException(status_code=404, detail="Template non trovato")
+
+    # salva archivio aggiornato
+    tpls[type] = new_arr
+    save_email_templates(tpls)
+
+    # se era agganciato come "attivo" nei settings, sgancialo
+    s = load_email_settings()
+    if type == "subject" and s.get("subject_template_id") == tid:
+        s["subject_template_id"] = None
+        save_email_settings(s)
+    if type == "body" and s.get("body_template_id") == tid:
+        s["body_template_id"] = None
+        save_email_settings(s)
+
+    return {"ok": True, "deleted_id": tid, "type": type}
+
 
 @app.post("/auth/change-password")
 def change_password(body: ChangePassword):
