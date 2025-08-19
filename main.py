@@ -8,6 +8,12 @@ import os, json, uuid, hashlib, re
 
 APP_VERSION = "1.1.0"
 
+# crea l'app FastAPI (DEVE esserci questa riga, fuori da funzioni/classi)
+app = FastAPI(title="Damiano API", version=APP_VERSION)
+
+
+APP_VERSION = "1.1.0"
+
 # === CONFIG / STORAGE ===
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
