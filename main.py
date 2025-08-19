@@ -1,10 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
-from datetime import datetime, timezone
-from fastapi import Query
-from datetime import date, timedelta
+from datetime import datetime, timezone, date, timedelta
 from zoneinfo import ZoneInfo  # per fuso Europe/Rome
 import os, json, uuid, hashlib, re
 
@@ -40,8 +38,10 @@ def _save_json(path: str, data):
 def _norm(s: Optional[str]) -> str:
     """Normalizza per confronto: toglie spazi e rende minuscolo."""
     return (s or "").strip().lower()
-    SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
-    TZ_ROME = ZoneInfo("Europe/Rome")
+
+# --- CONFIG GLOBALI ---
+SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
+TZ_ROME = ZoneInfo("Europe/Rome")
 
 # === AUTH init (password demo) ===
 def _ensure_auth():
@@ -54,32 +54,26 @@ _ensure_auth()
 
 # === EMAIL SETTINGS/TEMPLATES init ===
 def _ensure_email_files():
-    # Valori ATTIVI (quelli che "si vedono sempre")
     _load_json(EMAIL_SETTINGS_PATH, {
         "subject": "In memoria di {{NOME}} {{COGNOME}}",
         "body": "Gentile {{NOME}} {{COGNOME}},\nTi ricordiamo con affetto in questa ricorrenza."
     })
-    # Modelli salvati (richiamabili per nome)
     _load_json(EMAIL_TEMPLATES_PATH, {
-        "subject": [],  # es: [{"id":"...","name":"Damiano1","content":"...","created_at":"..."}]
+        "subject": [],
         "body": []
     })
 
 _ensure_email_files()
 def load_email_settings():
-    # Ritorna i valori ATTIVI (quelli che si vedono sempre)
     return _load_json(EMAIL_SETTINGS_PATH, {"subject": "", "body": ""})
 
 def save_email_settings(data: dict):
-    # Salva i valori ATTIVI
     _save_json(EMAIL_SETTINGS_PATH, data)
 
 def load_email_templates():
-    # Ritorna i modelli salvati (richiamabili per nome)
     return _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
 
 def save_email_templates(data: dict):
-    # Salva l’archivio dei modelli
     _save_json(EMAIL_TEMPLATES_PATH, data)
 
 def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
@@ -94,9 +88,6 @@ def _today_rome_date() -> date:
     return datetime.now(TZ_ROME).date()
 
 def _due_today(rec: dict, today: date) -> bool:
-    """
-    True se OGGI è il giorno di invio: anniversario(def_data) - giorni_prima == today
-    """
     gd = _parse_yyyy_mm_dd(rec.get("def_data"))
     gp = rec.get("giorni_prima")
     if not gd or gp is None:
@@ -111,7 +102,6 @@ def _due_today(rec: dict, today: date) -> bool:
     if reminder == today:
         return True
 
-    # se promemoria di quest'anno è passato, consideriamo quello per l'anno prossimo
     ann_next = date(today.year + 1, gd.month, gd.day)
     reminder_next = ann_next - timedelta(days=gp)
     return reminder_next == today
@@ -119,16 +109,10 @@ def _due_today(rec: dict, today: date) -> bool:
 def _parse_recipients(raw: Optional[str]) -> list[str]:
     if not raw:
         return []
-    parts = []
     for sep in [",", ";"]:
         raw = raw.replace(sep, " ")
-    for token in raw.split():
-        t = token.strip()
-        if "@" in t and "." in t:
-            parts.append(t)
-    # deduplica preservando l'ordine
-    seen = set()
-    out = []
+    parts = [t.strip() for t in raw.split() if "@" in t and "." in t]
+    seen, out = set(), []
     for x in parts:
         if x not in seen:
             seen.add(x)
@@ -172,53 +156,45 @@ class Record(BaseModel):
     telefono_prefisso: Optional[str] = "+39"
     telefono_numero: Optional[str] = None
     email: Optional[EmailStr] = None
-
-    # nuovi campi richiesti
     def_nome: Optional[str] = None
     def_cognome: Optional[str] = None
-    def_data: Optional[str] = None   # ISO YYYY-MM-DD
+    def_data: Optional[str] = None
     giorni_prima: Optional[int] = None
     oggetto: Optional[str] = None
     corpo: Optional[str] = None
-
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
-    
-     # nuovo flag per controllare invio mail
     sospendi_invio: Optional[bool] = False
-    
+
 class EmailSettingsIn(BaseModel):
-    # Valori ATTIVI (quelli visibili sempre nella pagina)
     subject: Optional[str] = None
     body: Optional[str] = None
-    # opzionali: se vuoi tracciare quale modello è attivo
     subject_template_id: Optional[str] = None
     body_template_id: Optional[str] = None
 
 class EmailTemplateIn(BaseModel):
-    # Modello salvabile/richiamabile: 'subject' oppure 'body'
     type: str  # 'subject' | 'body'
-    name: str  # es. "Damiano1"
+    name: str
     content: str
-
 
 # === APP ===
 app = FastAPI(title="Damiano API", version=APP_VERSION)
 
-# CORS aperto (per GitHub Pages / Render)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # in futuro restringi a "https://damiano-frontend.onrender.com"
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-from fastapi import Header
+# --- ENDPOINTS ---
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
 
 @app.post("/admin/send-due-emails")
 def send_due_emails(x_secret: Optional[str] = Header(None)):
-    # Protezione semplice via header
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -226,7 +202,6 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
     records = load_records()
     sent_rows = _load_sent()
 
-    # testi attivi globali (fallback)
     settings = load_email_settings()
     default_subject = settings.get("subject") or "In memoria"
     default_body = settings.get("body") or "Un pensiero in questa ricorrenza."
@@ -235,29 +210,22 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
 
     for r in records:
         try:
-            # esclusione tramite flag
             if r.get("sospendi_invio") is True:
                 skipped.append({"id": r.get("id"), "reason": "blocked_by_flag"})
                 continue
-
-            # deve essere "in scadenza" oggi
             if not _due_today(r, today):
                 continue
 
-            # destinatari
             to_list = _parse_recipients(r.get("email"))
             if not to_list:
                 skipped.append({"id": r.get("id"), "reason": "no_email"})
                 continue
 
-            # priorità: testi per-record se presenti, altrimenti globali
             subject_raw = r.get("oggetto") or default_subject
             body_raw = r.get("corpo") or default_body
-
             subject = _fill_placeholders(subject_raw, r)
             body = _fill_placeholders(body_raw, r)
 
-            # --- simulazione invio ---
             log_row = {
                 "record_id": r.get("id"),
                 "to": to_list,
@@ -274,18 +242,13 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
             }
             sent_rows.append(log_row)
             processed.append({"id": r.get("id"), "to": to_list})
-
         except Exception as e:
             errors.append({"id": r.get("id"), "error": str(e)})
 
     _save_sent(sent_rows)
     return {
         "date": today.isoformat(),
-        "counts": {
-            "processed": len(processed),
-            "skipped": len(skipped),
-            "errors": len(errors),
-        },
+        "counts": {"processed": len(processed), "skipped": len(skipped), "errors": len(errors)},
         "processed": processed,
         "skipped": skipped,
         "errors": errors,
@@ -309,101 +272,6 @@ def load_records() -> List[dict]:
 def save_records(data: List[dict]):
     _save_json(RECORDS_PATH, data)
 
-# === ENDPOINTS ===
-@app.get("/health")
-def health():
-    return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
-    
-    # --- RECORDS LIST/READ ---
-@app.get("/records")
-def list_records():
-    return load_records()
-
-@app.get("/records/{rid}")
-def read_record(rid: str):
-    data = load_records()
-    for r in data:
-        if r["id"] == rid:
-            return r
-    raise HTTPException(status_code=404, detail="Not found")
-
-from fastapi import Header
-
-@app.post("/admin/send-due-emails")
-def send_due_emails(x_secret: Optional[str] = Header(None)):
-    # Protezione semplice via header
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    today = _today_rome_date()
-    records = load_records()
-    sent_rows = _load_sent()
-
-    # testi attivi globali (fallback)
-    settings = load_email_settings()
-    default_subject = settings.get("subject") or "In memoria"
-    default_body = settings.get("body") or "Un pensiero in questa ricorrenza."
-
-    processed, skipped, errors = [], [], []
-
-    for r in records:
-        try:
-            # esclusione tramite flag
-            if r.get("sospendi_invio") is True:
-                skipped.append({"id": r.get("id"), "reason": "blocked_by_flag"})
-                continue
-
-            # deve essere "in scadenza" oggi
-            if not _due_today(r, today):
-                continue
-
-            # destinatari
-            to_list = _parse_recipients(r.get("email"))
-            if not to_list:
-                skipped.append({"id": r.get("id"), "reason": "no_email"})
-                continue
-
-            # priorità: testi per-record se presenti, altrimenti globali
-            subject_raw = r.get("oggetto") or default_subject
-            body_raw = r.get("corpo") or default_body
-
-            subject = _fill_placeholders(subject_raw, r)
-            body = _fill_placeholders(body_raw, r)
-
-            # FASE 1: simulazione → non inviamo davvero, ma logghiamo l'operazione come "ok"
-            log_row = {
-                "record_id": r.get("id"),
-                "to": to_list,
-                "subject": subject,
-                "body_usato": body,
-                "nome": r.get("nome"),
-                "cognome": r.get("cognome"),
-                "def_nome": r.get("def_nome"),
-                "def_cognome": r.get("def_cognome"),
-                "scheduled_for": today.isoformat(),
-                "sent_at": _now_iso(),
-                "stato": "ok",
-                "errore": None,
-            }
-            sent_rows.append(log_row)
-            processed.append({"id": r.get("id"), "to": to_list})
-
-        except Exception as e:
-            errors.append({"id": r.get("id"), "error": str(e)})
-
-    _save_sent(sent_rows)
-    return {
-        "date": today.isoformat(),
-        "counts": {
-            "processed": len(processed),
-            "skipped": len(skipped),
-            "errors": len(errors),
-        },
-        "processed": processed,
-        "skipped": skipped,
-        "errors": errors,
-    }
-
 # --- AUTH ---
 @app.post("/auth/login", response_model=LoginResponse)
 def login(body: LoginRequest):
@@ -411,56 +279,6 @@ def login(body: LoginRequest):
     if _sha(body.password) != auth.get("password_sha"):
         raise HTTPException(status_code=401, detail="Credenziali non valide")
     return {"token": "damiano-token"}
-
-
-@app.delete("/api/email/templates/{tid}")
-def delete_email_template(tid: str, type: str = Query(..., description="'subject' o 'body'")):
-    if type not in ("subject", "body"):
-        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
-
-    tpls = load_email_templates()
-    arr = tpls.get(type, [])
-    new_arr = [x for x in arr if x.get("id") != tid]
-
-    if len(new_arr) == len(arr):
-        raise HTTPException(status_code=404, detail="Template non trovato")
-
-    tpls[type] = new_arr
-    save_email_templates(tpls)
-
-    s = load_email_settings()
-    if type == "subject" and s.get("subject_template_id") == tid:
-        s["subject_template_id"] = None
-        save_email_settings(s)
-    if type == "body" and s.get("body_template_id") == tid:
-        s["body_template_id"] = None
-        save_email_settings(s)
-
-    return {"ok": True, "deleted_id": tid, "type": type}
-
-    # carica archivio modelli
-    tpls = load_email_templates()
-    arr = tpls.get(type, [])
-    new_arr = [x for x in arr if x.get("id") != tid]
-
-    if len(new_arr) == len(arr):
-        raise HTTPException(status_code=404, detail="Template non trovato")
-
-    # salva archivio aggiornato
-    tpls[type] = new_arr
-    save_email_templates(tpls)
-
-    # se era agganciato come "attivo" nei settings, sgancialo
-    s = load_email_settings()
-    if type == "subject" and s.get("subject_template_id") == tid:
-        s["subject_template_id"] = None
-        save_email_settings(s)
-    if type == "body" and s.get("body_template_id") == tid:
-        s["body_template_id"] = None
-        save_email_settings(s)
-
-    return {"ok": True, "deleted_id": tid, "type": type}
-
 
 @app.post("/auth/change-password")
 def change_password(body: ChangePassword):
@@ -474,12 +292,22 @@ def change_password(body: ChangePassword):
     return {"ok": True}
 
 # --- RECORDS CRUD ---
+@app.get("/records")
+def list_records():
+    return load_records()
+
+@app.get("/records/{rid}")
+def read_record(rid: str):
+    data = load_records()
+    for r in data:
+        if r["id"] == rid:
+            return r
+    raise HTTPException(status_code=404, detail="Not found")
+
 @app.post("/records")
 def create_record(rec: Record):
     data = load_records()
     now = _now_iso()
-
-    # Duplicate se coincidono: persona + defunto (normalizzati)
     for r in data:
         if (
             _norm(r.get("nome")) == _norm(rec.nome) and
@@ -488,14 +316,8 @@ def create_record(rec: Record):
             _norm(r.get("telefono_numero")) == _norm(rec.telefono_numero) and
             _norm(r.get("def_nome")) == _norm(rec.def_nome) and
             _norm(r.get("def_cognome")) == _norm(rec.def_cognome)
-            # Se vuoi includere anche la data del decesso, togli il commento qui sotto:
-            # and _norm(r.get("def_data")) == _norm(rec.def_data)
         ):
-            raise HTTPException(
-                status_code=409,
-                detail="Contatto duplicato (persona + defunto già presente)"
-            )
-
+            raise HTTPException(status_code=409, detail="Contatto duplicato")
     obj = rec.model_dump()
     obj["id"] = uuid.uuid4().hex
     obj["created_at"] = now
@@ -503,7 +325,6 @@ def create_record(rec: Record):
     data.append(obj)
     save_records(data)
     return obj
-
 
 @app.put("/records/{rid}")
 def update_record(rid: str, rec: Record):
@@ -528,7 +349,8 @@ def emails_sent():
         {"to":"sara.bianchi@example.com","subject":"Aggiornamento","sent_at":"2025-08-05T15:30:00Z","status":"ok"}
     ])
     return {"emails": sample}
-# === EMAIL: SETTINGS (valori ATTIVI) ===
+
+# === EMAIL: SETTINGS ===
 @app.get("/api/email/settings")
 def get_email_settings():
     s = load_email_settings()
@@ -543,55 +365,32 @@ def get_email_settings():
 @app.put("/api/email/settings")
 def update_email_settings(body: EmailSettingsIn):
     s = load_email_settings()
-    if body.subject is not None:
-        s["subject"] = body.subject
-    if body.body is not None:
-        s["body"] = body.body
-    if body.subject_template_id is not None:
-        s["subject_template_id"] = body.subject_template_id
-    if body.body_template_id is not None:
-        s["body_template_id"] = body.body_template_id
-
+    if body.subject is not None: s["subject"] = body.subject
+    if body.body is not None: s["body"] = body.body
+    if body.subject_template_id is not None: s["subject_template_id"] = body.subject_template_id
+    if body.body_template_id is not None: s["body_template_id"] = body.body_template_id
     s["updated_at"] = _now_iso()
     save_email_settings(s)
     return {"ok": True}
 
-
-# === EMAIL: TEMPLATES (modelli salvati/richiamabili) ===
+# === EMAIL: TEMPLATES ===
 @app.get("/api/email/templates")
 def list_email_templates(type: str):
-    """
-    Query string: ?type=subject | body
-    Ritorna la lista dei modelli salvati per il tipo richiesto.
-    """
     if type not in ("subject", "body"):
-        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
+        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'" )
     alltpl = load_email_templates()
     return alltpl.get(type, [])
 
 @app.post("/api/email/templates")
 def create_email_template(tpl: EmailTemplateIn):
-    """
-    Crea un nuovo modello (subject/body).
-    Per comodità, lo rende anche 'attivo' aggiornando email_settings.
-    """
     t = tpl.type
     if t not in ("subject", "body"):
         raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
-
     alltpl = load_email_templates()
-    new_item = {
-        "id": uuid.uuid4().hex,
-        "name": tpl.name,
-        "content": tpl.content,
-        "created_at": _now_iso(),
-    }
-    # inserisco in testa alla lista del tipo
+    new_item = {"id": uuid.uuid4().hex, "name": tpl.name, "content": tpl.content, "created_at": _now_iso()}
     alltpl.setdefault(t, [])
     alltpl[t].insert(0, new_item)
     save_email_templates(alltpl)
-
-    # aggiorno anche i valori ATTIVI
     s = load_email_settings()
     if t == "subject":
         s["subject"] = tpl.content
@@ -601,7 +400,26 @@ def create_email_template(tpl: EmailTemplateIn):
         s["body_template_id"] = new_item["id"]
     s["updated_at"] = _now_iso()
     save_email_settings(s)
-
     return {"id": new_item["id"], "ok": True}
+
+@app.delete("/api/email/templates/{tid}")
+def delete_email_template(tid: str, type: str = Query(...)):
+    if type not in ("subject", "body"):
+        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'" )
+    tpls = load_email_templates()
+    arr = tpls.get(type, [])
+    new_arr = [x for x in arr if x.get("id") != tid]
+    if len(new_arr) == len(arr):
+        raise HTTPException(status_code=404, detail="Template non trovato")
+    tpls[type] = new_arr
+    save_email_templates(tpls)
+    s = load_email_settings()
+    if type == "subject" and s.get("subject_template_id") == tid:
+        s["subject_template_id"] = None
+    if type == "body" and s.get("body_template_id") == tid:
+        s["body_template_id"] = None
+    save_email_settings(s)
+    return {"ok": True, "deleted_id": tid, "type": type}
+
 
 
