@@ -306,7 +306,7 @@ def update_email_settings(body: EmailSettingsIn):
     if body.subject_template_id is not None:
         s["subject_template_id"] = body.subject_template_id
     if body.body_template_id is not None:
-    s["body_template_id"] = body.body_template_id
+        s["body_template_id"] = body.body_template_id
 
     s["updated_at"] = _now_iso()
     save_email_settings(s)
