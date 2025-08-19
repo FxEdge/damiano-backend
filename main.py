@@ -214,6 +214,83 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi import Header
+
+@app.post("/admin/send-due-emails")
+def send_due_emails(x_secret: Optional[str] = Header(None)):
+    # Protezione semplice via header
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    today = _today_rome_date()
+    records = load_records()
+    sent_rows = _load_sent()
+
+    # testi attivi globali (fallback)
+    settings = load_email_settings()
+    default_subject = settings.get("subject") or "In memoria"
+    default_body = settings.get("body") or "Un pensiero in questa ricorrenza."
+
+    processed, skipped, errors = [], [], []
+
+    for r in records:
+        try:
+            # esclusione tramite flag
+            if r.get("sospendi_invio") is True:
+                skipped.append({"id": r.get("id"), "reason": "blocked_by_flag"})
+                continue
+
+            # deve essere "in scadenza" oggi
+            if not _due_today(r, today):
+                continue
+
+            # destinatari
+            to_list = _parse_recipients(r.get("email"))
+            if not to_list:
+                skipped.append({"id": r.get("id"), "reason": "no_email"})
+                continue
+
+            # priorità: testi per-record se presenti, altrimenti globali
+            subject_raw = r.get("oggetto") or default_subject
+            body_raw = r.get("corpo") or default_body
+
+            subject = _fill_placeholders(subject_raw, r)
+            body = _fill_placeholders(body_raw, r)
+
+            # --- simulazione invio ---
+            log_row = {
+                "record_id": r.get("id"),
+                "to": to_list,
+                "subject": subject,
+                "body_usato": body,
+                "nome": r.get("nome"),
+                "cognome": r.get("cognome"),
+                "def_nome": r.get("def_nome"),
+                "def_cognome": r.get("def_cognome"),
+                "scheduled_for": today.isoformat(),
+                "sent_at": _now_iso(),
+                "stato": "ok",
+                "errore": None,
+            }
+            sent_rows.append(log_row)
+            processed.append({"id": r.get("id"), "to": to_list})
+
+        except Exception as e:
+            errors.append({"id": r.get("id"), "error": str(e)})
+
+    _save_sent(sent_rows)
+    return {
+        "date": today.isoformat(),
+        "counts": {
+            "processed": len(processed),
+            "skipped": len(skipped),
+            "errors": len(errors),
+        },
+        "processed": processed,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
 # === HELPERS RECORDS ===
 def load_records() -> List[dict]:
     data = _load_json(RECORDS_PATH, [])
