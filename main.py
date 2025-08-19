@@ -159,6 +159,19 @@ def save_records(data: List[dict]):
 @app.get("/health")
 def health():
     return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
+    
+    # --- RECORDS LIST/READ ---
+@app.get("/records")
+def list_records():
+    return load_records()
+
+@app.get("/records/{rid}")
+def read_record(rid: str):
+    data = load_records()
+    for r in data:
+        if r["id"] == rid:
+            return r
+    raise HTTPException(status_code=404, detail="Not found")
 
 # --- AUTH ---
 @app.post("/auth/login", response_model=LoginResponse)
