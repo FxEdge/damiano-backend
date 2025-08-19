@@ -4,6 +4,8 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime, timezone
 from fastapi import Query
+from datetime import date, timedelta
+from zoneinfo import ZoneInfo  # per fuso Europe/Rome
 import os, json, uuid, hashlib, re
 
 APP_VERSION = "1.1.0"
@@ -38,6 +40,8 @@ def _save_json(path: str, data):
 def _norm(s: Optional[str]) -> str:
     """Normalizza per confronto: toglie spazi e rende minuscolo."""
     return (s or "").strip().lower()
+    SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
+    TZ_ROME = ZoneInfo("Europe/Rome")
 
 # === AUTH init (password demo) ===
 def _ensure_auth():
@@ -78,6 +82,76 @@ def save_email_templates(data: dict):
     # Salva l’archivio dei modelli
     _save_json(EMAIL_TEMPLATES_PATH, data)
 
+def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
+    try:
+        if not s: return None
+        y, m, d = map(int, s.split("-"))
+        return date(y, m, d)
+    except Exception:
+        return None
+
+def _today_rome_date() -> date:
+    return datetime.now(TZ_ROME).date()
+
+def _due_today(rec: dict, today: date) -> bool:
+    """
+    True se OGGI è il giorno di invio: anniversario(def_data) - giorni_prima == today
+    """
+    gd = _parse_yyyy_mm_dd(rec.get("def_data"))
+    gp = rec.get("giorni_prima")
+    if not gd or gp is None:
+        return False
+    try:
+        gp = int(gp)
+    except Exception:
+        return False
+
+    ann_this = date(today.year, gd.month, gd.day)
+    reminder = ann_this - timedelta(days=gp)
+    if reminder == today:
+        return True
+
+    # se promemoria di quest'anno è passato, consideriamo quello per l'anno prossimo
+    ann_next = date(today.year + 1, gd.month, gd.day)
+    reminder_next = ann_next - timedelta(days=gp)
+    return reminder_next == today
+
+def _parse_recipients(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    parts = []
+    for sep in [",", ";"]:
+        raw = raw.replace(sep, " ")
+    for token in raw.split():
+        t = token.strip()
+        if "@" in t and "." in t:
+            parts.append(t)
+    # deduplica preservando l'ordine
+    seen = set()
+    out = []
+    for x in parts:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+def _fill_placeholders(text: str, rec: dict) -> str:
+    rep = {
+        "{{NOME}}": rec.get("nome") or "",
+        "{{COGNOME}}": rec.get("cognome") or "",
+        "{{DEF_NOME}}": rec.get("def_nome") or "",
+        "{{DEF_COGNOME}}": rec.get("def_cognome") or "",
+        "{{DATA_DEF}}": rec.get("def_data") or "",
+    }
+    for k, v in rep.items():
+        text = (text or "").replace(k, v)
+    return text
+
+def _load_sent() -> list:
+    return _load_json(EMAILS_PATH, [])
+
+def _save_sent(rows: list):
+    _save_json(EMAILS_PATH, rows)
 
 # === MODELS ===
 class LoginRequest(BaseModel):
@@ -109,6 +183,9 @@ class Record(BaseModel):
 
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    
+     # nuovo flag per controllare invio mail
+    sospendi_invio: Optional[bool] = False
     
 class EmailSettingsIn(BaseModel):
     # Valori ATTIVI (quelli visibili sempre nella pagina)
@@ -172,6 +249,83 @@ def read_record(rid: str):
         if r["id"] == rid:
             return r
     raise HTTPException(status_code=404, detail="Not found")
+
+from fastapi import Header
+
+@app.post("/admin/send-due-emails")
+def send_due_emails(x_secret: Optional[str] = Header(None)):
+    # Protezione semplice via header
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    today = _today_rome_date()
+    records = load_records()
+    sent_rows = _load_sent()
+
+    # testi attivi globali (fallback)
+    settings = load_email_settings()
+    default_subject = settings.get("subject") or "In memoria"
+    default_body = settings.get("body") or "Un pensiero in questa ricorrenza."
+
+    processed, skipped, errors = [], [], []
+
+    for r in records:
+        try:
+            # esclusione tramite flag
+            if r.get("sospendi_invio") is True:
+                skipped.append({"id": r.get("id"), "reason": "blocked_by_flag"})
+                continue
+
+            # deve essere "in scadenza" oggi
+            if not _due_today(r, today):
+                continue
+
+            # destinatari
+            to_list = _parse_recipients(r.get("email"))
+            if not to_list:
+                skipped.append({"id": r.get("id"), "reason": "no_email"})
+                continue
+
+            # priorità: testi per-record se presenti, altrimenti globali
+            subject_raw = r.get("oggetto") or default_subject
+            body_raw = r.get("corpo") or default_body
+
+            subject = _fill_placeholders(subject_raw, r)
+            body = _fill_placeholders(body_raw, r)
+
+            # FASE 1: simulazione → non inviamo davvero, ma logghiamo l'operazione come "ok"
+            log_row = {
+                "record_id": r.get("id"),
+                "to": to_list,
+                "subject": subject,
+                "body_usato": body,
+                "nome": r.get("nome"),
+                "cognome": r.get("cognome"),
+                "def_nome": r.get("def_nome"),
+                "def_cognome": r.get("def_cognome"),
+                "scheduled_for": today.isoformat(),
+                "sent_at": _now_iso(),
+                "stato": "ok",
+                "errore": None,
+            }
+            sent_rows.append(log_row)
+            processed.append({"id": r.get("id"), "to": to_list})
+
+        except Exception as e:
+            errors.append({"id": r.get("id"), "error": str(e)})
+
+    _save_sent(sent_rows)
+    return {
+        "date": today.isoformat(),
+        "counts": {
+            "processed": len(processed),
+            "skipped": len(skipped),
+            "errors": len(errors),
+        },
+        "processed": processed,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 # --- AUTH ---
 @app.post("/auth/login", response_model=LoginResponse)
