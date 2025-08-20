@@ -199,6 +199,15 @@ app.add_middleware(
 def health():
     return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
 
+@app.get("/admin/sent-emails")
+def get_sent_emails():
+    return _load_json(EMAILS_PATH, [])
+
+@app.delete("/admin/sent-emails")
+def clear_sent_emails():
+    _save_json(EMAILS_PATH, [])
+    return {"ok": True}
+
 @app.post("/admin/send-due-emails")
 def send_due_emails(x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
