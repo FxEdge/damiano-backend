@@ -8,11 +8,8 @@ import os, json, uuid, hashlib, re
 
 APP_VERSION = "1.1.0"
 
-# crea l'app FastAPI (DEVE esserci questa riga, fuori da funzioni/classi)
+# === APP ===
 app = FastAPI(title="Damiano API", version=APP_VERSION)
-
-
-APP_VERSION = "1.1.0"
 
 # === CONFIG / STORAGE ===
 DATA_DIR = os.environ.get("DATA_DIR", "data")
@@ -22,6 +19,10 @@ AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
 EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
 EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
 EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
+
+# --- CONFIG GLOBALI ---
+SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
+TZ_ROME = ZoneInfo("Europe/Rome")
 
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -45,10 +46,6 @@ def _norm(s: Optional[str]) -> str:
     """Normalizza per confronto: toglie spazi e rende minuscolo."""
     return (s or "").strip().lower()
 
-# --- CONFIG GLOBALI ---
-SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
-TZ_ROME = ZoneInfo("Europe/Rome")
-
 # === AUTH init (password demo) ===
 def _ensure_auth():
     data = _load_json(AUTH_PATH, {"password_sha": _sha("demo")})
@@ -64,12 +61,9 @@ def _ensure_email_files():
         "subject": "In memoria di {{NOME}} {{COGNOME}}",
         "body": "Gentile {{NOME}} {{COGNOME}},\nTi ricordiamo con affetto in questa ricorrenza."
     })
-    _load_json(EMAIL_TEMPLATES_PATH, {
-        "subject": [],
-        "body": []
-    })
-
+    _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
 _ensure_email_files()
+
 def load_email_settings():
     return _load_json(EMAIL_SETTINGS_PATH, {"subject": "", "body": ""})
 
@@ -82,6 +76,7 @@ def load_email_templates():
 def save_email_templates(data: dict):
     _save_json(EMAIL_TEMPLATES_PATH, data)
 
+# === DATE HELPERS ===
 def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
     try:
         if not s: return None
@@ -93,24 +88,36 @@ def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
 def _today_rome_date() -> date:
     return datetime.now(TZ_ROME).date()
 
+def _add_years_safe(d: date, years: int) -> date:
+    """Aggiunge anni gestendo il 29/02 -> 28/02 se anno non bisestile."""
+    try:
+        return d.replace(year=d.year + years)
+    except ValueError:
+        # 29/02 -> 28/02 nell'anno non bisestile
+        return d.replace(month=2, day=28, year=d.year + years)
+
+def _compute_first_ricorrenza(def_d: Optional[str]) -> Optional[str]:
+    """Prima ricorrenza = def_data + 1 anno."""
+    gd = _parse_yyyy_mm_dd(def_d)
+    if not gd:
+        return None
+    return _add_years_safe(gd, 1).isoformat()
+
 def _due_today(rec: dict, today: date) -> bool:
-    gd = _parse_yyyy_mm_dd(rec.get("def_data"))
+    """
+    True se OGGI è il giorno di invio:
+    (prossima_ricorrenza - giorni_prima) == today
+    """
+    pr = _parse_yyyy_mm_dd(rec.get("prossima_ricorrenza"))
     gp = rec.get("giorni_prima")
-    if not gd or gp is None:
+    if not pr or gp is None:
         return False
     try:
         gp = int(gp)
     except Exception:
         return False
-
-    ann_this = date(today.year, gd.month, gd.day)
-    reminder = ann_this - timedelta(days=gp)
-    if reminder == today:
-        return True
-
-    ann_next = date(today.year + 1, gd.month, gd.day)
-    reminder_next = ann_next - timedelta(days=gp)
-    return reminder_next == today
+    reminder = pr - timedelta(days=gp)
+    return reminder == today
 
 def _parse_recipients(raw: Optional[str]) -> list[str]:
     if not raw:
@@ -132,6 +139,7 @@ def _fill_placeholders(text: str, rec: dict) -> str:
         "{{DEF_NOME}}": rec.get("def_nome") or "",
         "{{DEF_COGNOME}}": rec.get("def_cognome") or "",
         "{{DATA_DEF}}": rec.get("def_data") or "",
+        "{{DATA_RIC}}": rec.get("prossima_ricorrenza") or "",
     }
     for k, v in rep.items():
         text = (text or "").replace(k, v)
@@ -168,6 +176,10 @@ class Record(BaseModel):
     giorni_prima: Optional[int] = None
     oggetto: Optional[str] = None
     corpo: Optional[str] = None
+
+    # NUOVO
+    prossima_ricorrenza: Optional[str] = None
+
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     sospendi_invio: Optional[bool] = False
@@ -183,9 +195,7 @@ class EmailTemplateIn(BaseModel):
     name: str
     content: str
 
-# === APP ===
-app = FastAPI(title="Damiano API", version=APP_VERSION)
-
+# === CORS ===
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -194,11 +204,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- ENDPOINTS ---
+# === HEALTH ===
 @app.get("/health")
 def health():
     return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
 
+# === EMAIL LOG ADMIN ===
 @app.get("/admin/sent-emails")
 def get_sent_emails():
     return _load_json(EMAILS_PATH, [])
@@ -208,6 +219,7 @@ def clear_sent_emails():
     _save_json(EMAILS_PATH, [])
     return {"ok": True}
 
+# === SCHEDULER (SIMULAZIONE INVIO) ===
 @app.post("/admin/send-due-emails")
 def send_due_emails(x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
@@ -236,11 +248,13 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
                 skipped.append({"id": r.get("id"), "reason": "no_email"})
                 continue
 
+            # priorità: per-record se presenti, altrimenti globali
             subject_raw = r.get("oggetto") or default_subject
             body_raw = r.get("corpo") or default_body
             subject = _fill_placeholders(subject_raw, r)
             body = _fill_placeholders(body_raw, r)
 
+            # --- simulazione invio ---
             log_row = {
                 "record_id": r.get("id"),
                 "to": to_list,
@@ -257,10 +271,19 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
             }
             sent_rows.append(log_row)
             processed.append({"id": r.get("id"), "to": to_list})
+
+            # Avanza la prossima ricorrenza di +1 anno
+            pr = _parse_yyyy_mm_dd(r.get("prossima_ricorrenza"))
+            if pr:
+                r["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
+
         except Exception as e:
             errors.append({"id": r.get("id"), "error": str(e)})
 
+    # salva aggiornamenti (ricorrenze avanzate) + log
+    save_records(records)
     _save_sent(sent_rows)
+
     return {
         "date": today.isoformat(),
         "counts": {"processed": len(processed), "skipped": len(skipped), "errors": len(errors)},
@@ -280,6 +303,12 @@ def load_records() -> List[dict]:
             r["created_at"] = _now_iso(); changed = True
         if not r.get("updated_at"):
             r["updated_at"] = r["created_at"]; changed = True
+        # MIGRAZIONE: se manca prossima_ricorrenza ma c'è def_data -> calcola
+        if not r.get("prossima_ricorrenza") and r.get("def_data"):
+            pr = _compute_first_ricorrenza(r.get("def_data"))
+            if pr:
+                r["prossima_ricorrenza"] = pr
+                changed = True
     if changed:
         _save_json(RECORDS_PATH, data)
     return data
@@ -287,7 +316,7 @@ def load_records() -> List[dict]:
 def save_records(data: List[dict]):
     _save_json(RECORDS_PATH, data)
 
-# --- AUTH ---
+# === AUTH ===
 @app.post("/auth/login", response_model=LoginResponse)
 def login(body: LoginRequest):
     auth = _ensure_auth()
@@ -306,7 +335,7 @@ def change_password(body: ChangePassword):
     _save_json(AUTH_PATH, auth)
     return {"ok": True}
 
-# --- RECORDS CRUD ---
+# === RECORDS CRUD ===
 @app.get("/records")
 def list_records():
     return load_records()
@@ -323,6 +352,8 @@ def read_record(rid: str):
 def create_record(rec: Record):
     data = load_records()
     now = _now_iso()
+
+    # Duplicate se coincidono: persona + defunto (normalizzati)
     for r in data:
         if (
             _norm(r.get("nome")) == _norm(rec.nome) and
@@ -331,12 +362,20 @@ def create_record(rec: Record):
             _norm(r.get("telefono_numero")) == _norm(rec.telefono_numero) and
             _norm(r.get("def_nome")) == _norm(rec.def_nome) and
             _norm(r.get("def_cognome")) == _norm(rec.def_cognome)
+            # volendo aggiungere anche la data del decesso, decommentare:
+            # and _norm(r.get("def_data")) == _norm(rec.def_data)
         ):
             raise HTTPException(status_code=409, detail="Contatto duplicato")
+
     obj = rec.model_dump()
     obj["id"] = uuid.uuid4().hex
     obj["created_at"] = now
     obj["updated_at"] = now
+
+    # Imposta la prima ricorrenza se possibile
+    if not obj.get("prossima_ricorrenza"):
+        obj["prossima_ricorrenza"] = _compute_first_ricorrenza(obj.get("def_data"))
+
     data.append(obj)
     save_records(data)
     return obj
@@ -350,6 +389,11 @@ def update_record(rid: str, rec: Record):
             incoming = rec.model_dump()
             incoming["id"] = rid
             updated.update(incoming)
+
+            # Se la def_data è cambiata -> reset prima ricorrenza = def_data + 1 anno
+            if incoming.get("def_data") != r.get("def_data"):
+                updated["prossima_ricorrenza"] = _compute_first_ricorrenza(incoming.get("def_data"))
+
             updated["updated_at"] = _now_iso()
             data[i] = updated
             save_records(data)
@@ -435,6 +479,7 @@ def delete_email_template(tid: str, type: str = Query(...)):
         s["body_template_id"] = None
     save_email_settings(s)
     return {"ok": True, "deleted_id": tid, "type": type}
+
 
 
 
