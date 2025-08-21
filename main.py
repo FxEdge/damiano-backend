@@ -296,6 +296,20 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
         "skipped": skipped,
         "errors": errors,
     }
+    # === TEST INVIO REALE (NEW) ===
+@app.post("/admin/send-test-email")
+def send_test_email(to: str, x_secret: Optional[str] = Header(None)):
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    subject = "Test Damiano – invio email"
+    html = "<div style='font-family:system-ui'>Ciao 👋<br>Questa è una mail di TEST dal backend Damiano.</div>"
+    try:
+        send_email(to, subject, html, plain_fallback="Ciao, questa è una mail di TEST dal backend Damiano.")
+        return {"ok": True, "to": to}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore invio: {e}" )
+
 # === CATCH-UP HELPERS (NEW) ===
 def _already_sent(sent_log: list, record_id: Optional[str], due_date_iso: str) -> bool:
     """
