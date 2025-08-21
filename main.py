@@ -295,6 +295,125 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
         "skipped": skipped,
         "errors": errors,
     }
+# === CATCH-UP HELPERS (NEW) ===
+def _already_sent(sent_log: list, record_id: Optional[str], due_date_iso: str) -> bool:
+    """
+    Ritorna True se per questo record è già stato loggato un invio
+    per la ricorrenza 'due_date_iso' (idempotenza).
+    """
+    if not record_id:
+        return False
+    for e in sent_log:
+        if e.get("record_id") == record_id and e.get("due_date") == due_date_iso:
+            return True
+    return False
+
+def _date_range(d0: date, d1: date):
+    cur = d0
+    while cur <= d1:
+        yield cur
+        cur = cur + timedelta(days=1)
+# === INVIO CON CATCH-UP (NEW) ===
+def send_emails_catchup():
+    """
+    Alla prima esecuzione utile, recupera e invia tutte le mail
+    non inviate dei giorni passati (tra last_run+1 e oggi) evitando duplicati.
+    Mantiene lo stesso comportamento della /admin/send-due-emails:
+    - usa subject/body per-record se presenti, altrimenti globali
+    - avanza 'prossima_ricorrenza' di +1 anno quando invia
+    - logga in sent_emails.json
+    """
+    today = _today_rome_date()
+    records = load_records()
+    sent_rows = _load_sent()
+
+    settings = load_email_settings()
+    default_subject = settings.get("subject") or "In memoria"
+    default_body    = settings.get("body") or "Un pensiero in questa ricorrenza."
+
+    # intervallo: (last_run + 1) .. today
+    last_run_day = load_last_run_date()
+    start_day = last_run_day + timedelta(days=1)
+
+    processed, skipped, errors = [], [], []
+
+    for day in _date_range(start_day, today):
+        day_iso = day.isoformat()
+
+        for r in records:
+            try:
+                if r.get("sospendi_invio") is True:
+                    continue
+                # Ricicliamo la logica già esistente: "è dovuto in questo giorno?"
+                if not _due_today(r, day):
+                    continue
+
+                rid = r.get("id")
+                if _already_sent(sent_rows, rid, day_iso):
+                    # già loggata per quella ricorrenza -> salta (idempotenza)
+                    continue
+
+                to_list = _parse_recipients(r.get("email"))
+                if not to_list:
+                    skipped.append({"id": rid, "reason": "no_email", "due_date": day_iso})
+                    continue
+
+                subject_raw = r.get("oggetto") or default_subject
+                body_raw    = r.get("corpo")   or default_body
+                subject = _fill_placeholders(subject_raw, r)
+                body    = _fill_placeholders(body_raw, r)
+
+                # --- qui puoi passare a invio reale con send_email(...) se vuoi ---
+                # Esempio (HTML semplice = body, fallback = body):
+                # send_email(to_list[0], subject, f"<pre>{body}</pre>", plain_fallback=body)
+
+                # Per ora manteniamo stesso comportamento della tua rotta: log simulato
+                log_row = {
+                    "record_id": rid,
+                    "to": to_list,
+                    "subject": subject,
+                    "body_usato": body,
+                    "nome": r.get("nome"),
+                    "cognome": r.get("cognome"),
+                    "def_nome": r.get("def_nome"),
+                    "def_cognome": r.get("def_cognome"),
+                    "scheduled_for": day_iso,
+                    "due_date": day_iso,              # <-- chiave per anti-duplicato
+                    "sent_at": _now_iso(),
+                    "stato": "ok",
+                    "errore": None,
+                }
+                sent_rows.append(log_row)
+                processed.append({"id": rid, "to": to_list, "due_date": day_iso})
+
+                # Avanza la prossima ricorrenza di +1 anno (coerente con /admin/send-due-emails)
+                pr = _parse_yyyy_mm_dd(r.get("prossima_ricorrenza"))
+                if pr:
+                    r["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
+
+            except Exception as e:
+                errors.append({"id": r.get("id"), "due_date": day_iso, "error": str(e)})
+
+    # salva aggiornamenti (ricorrenze avanzate) + log
+    save_records(records)
+    _save_sent(sent_rows)
+
+    # aggiorna il last_run
+    save_last_run_now()
+
+    return {
+        "processed_range": [start_day.isoformat(), today.isoformat()],
+        "counts": {"processed": len(processed), "skipped": len(skipped), "errors": len(errors)},
+        "processed": processed,
+        "skipped": skipped,
+        "errors": errors,
+    }
+# === SCHEDULER: CATCH-UP ENDPOINT (NEW) ===
+@app.post("/admin/catchup")
+def run_catchup(x_secret: Optional[str] = Header(None)):
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return send_emails_catchup()
 
 # === HELPERS RECORDS ===
 def load_records() -> List[dict]:
