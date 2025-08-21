@@ -269,6 +269,7 @@ def send_due_emails(x_secret: Optional[str] = Header(None)):
                 "def_nome": r.get("def_nome"),
                 "def_cognome": r.get("def_cognome"),
                 "scheduled_for": today.isoformat(),
+                "due_date": today.isoformat(),
                 "sent_at": _now_iso(),
                 "stato": "ok",
                 "errore": None,
