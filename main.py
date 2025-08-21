@@ -5,6 +5,10 @@ from typing import Optional, List
 from datetime import datetime, timezone, date, timedelta
 from zoneinfo import ZoneInfo  # per fuso Europe/Rome
 import os, json, uuid, hashlib, re
+# Import servizi email
+from email_service import send_email, render_template
+# ⬅️ Import funzioni di scheduling (punto 2)
+from utils_scheduler import load_last_run_date, save_last_run_now, _now_date
 
 APP_VERSION = "1.1.0"
 
