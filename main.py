@@ -29,7 +29,7 @@ def get_data_dir() -> str:
     s = _load_settings()
     return s.get("data_dir") or os.environ.get("DATA_DIR", "data")
 
-def _recompute_paths():
+ #def _recompute_paths():=========
     """(Ri)calcola tutte le path quando cambia la cartella dati."""
     global DATA_DIR, RECORDS_PATH, AUTH_PATH, EMAILS_PATH, EMAIL_SETTINGS_PATH, EMAIL_TEMPLATES_PATH
     DATA_DIR = get_data_dir()
@@ -64,7 +64,7 @@ def _load_json(path: str, default):
 def _save_json(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-
+_recompute_paths()
 def _norm(s: Optional[str]) -> str:
     """Normalizza per confronto: toglie spazi e rende minuscolo."""
     return (s or "").strip().lower()
