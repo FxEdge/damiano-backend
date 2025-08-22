@@ -16,13 +16,32 @@ APP_VERSION = "1.1.0"
 app = FastAPI(title="Damiano API", version=APP_VERSION)
 
 # === CONFIG / STORAGE ===
-DATA_DIR = os.environ.get("DATA_DIR", "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-RECORDS_PATH = os.path.join(DATA_DIR, "records.json")
-AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
-EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
-EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
-EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
+import shutil
+
+# file di settings per ricordare la cartella scelta anche ai riavvii
+SETTINGS_PATH = os.environ.get("SETTINGS_PATH", "app_settings.json")
+
+def _load_settings():
+    return _load_json(SETTINGS_PATH, {})
+
+def get_data_dir() -> str:
+    """Ordine di priorità: setting salvato -> ENV DATA_DIR -> 'data'"""
+    s = _load_settings()
+    return s.get("data_dir") or os.environ.get("DATA_DIR", "data")
+
+def _recompute_paths():
+    """(Ri)calcola tutte le path quando cambia la cartella dati."""
+    global DATA_DIR, RECORDS_PATH, AUTH_PATH, EMAILS_PATH, EMAIL_SETTINGS_PATH, EMAIL_TEMPLATES_PATH
+    DATA_DIR = get_data_dir()
+    os.makedirs(DATA_DIR, exist_ok=True)
+    RECORDS_PATH = os.path.join(DATA_DIR, "records.json")
+    AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
+    EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
+    EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
+    EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
+
+_recompute_paths()  # inizializza una volta
+
 
 # --- CONFIG GLOBALI ---
 SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
