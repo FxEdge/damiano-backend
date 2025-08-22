@@ -3,34 +3,47 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime, timezone, date, timedelta
-from zoneinfo import ZoneInfo  # per fuso Europe/Rome
-import os, json, uuid, hashlib, re
-# Import servizi email
-from email_service import send_email, render_template
-# ⬅️ Import funzioni di scheduling (punto 2)
+from zoneinfo import ZoneInfo
+import os, json, uuid, hashlib, re, shutil
+
+# servizi email
+from email_service import send_email, render_template  # render_template non usato ma ok importarlo
+# scheduler utils
 from utils_scheduler import load_last_run_date, save_last_run_now, _now_date
 
 APP_VERSION = "1.1.0"
-
-# === APP ===
 app = FastAPI(title="Damiano API", version=APP_VERSION)
 
-# === CONFIG / STORAGE ===
-import shutil
-import os, json
+# =========================
+#  STORAGE / CONFIG  (OK)
+# =========================
 
-# file di settings per ricordare la cartella scelta anche ai riavvii
+def _load_json(path: str, default):
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(default, f, ensure_ascii=False, indent=2)
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _save_json(path: str, data):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# file settings per ricordare la cartella scelta
 SETTINGS_PATH = os.environ.get("SETTINGS_PATH", "app_settings.json")
 
 def _load_settings():
     return _load_json(SETTINGS_PATH, {})
 
 def get_data_dir() -> str:
-    """Ordine di priorità: setting salvato -> ENV DATA_DIR -> 'data'"""
+    """Priorità: setting salvato -> ENV DATA_DIR -> 'data'"""
     s = _load_settings()
     return s.get("data_dir") or os.environ.get("DATA_DIR", "data")
 
- #def _recompute_paths():=========
+def _recompute_paths():
     """(Ri)calcola tutte le path quando cambia la cartella dati."""
     global DATA_DIR, RECORDS_PATH, AUTH_PATH, EMAILS_PATH, EMAIL_SETTINGS_PATH, EMAIL_TEMPLATES_PATH
     DATA_DIR = get_data_dir()
@@ -40,22 +53,17 @@ def get_data_dir() -> str:
     EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
     EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
     EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
-# <<< CHIAMALA SOLO QUI, DOPO LA DEFINIZIONE >>>
-_recompute_paths()
-# --- CONFIG GLOBALI ---
-SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
-TZ_ROME = ZoneInfo("Europe/Rome")
-def _load_json(path: str, default):
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, ensure_ascii=False, indent=2)
-        return default
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
-def _save_json(path: str, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# inizializza subito i percorsi
+_recompute_paths()
+
+# =========================
+#  GLOBAL / UTILS  (OK)
+# =========================
+
+SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")
+TZ_ROME = ZoneInfo("Europe/Rome")
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -63,63 +71,37 @@ def _sha(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 def _norm(s: Optional[str]) -> str:
-    """Normalizza per confronto: toglie spazi e rende minuscolo."""
     return (s or "").strip().lower()
-import shutil
 
-SETTINGS_PATH = os.environ.get("SETTINGS_PATH", "app_settings.json")
+# =========================
+#  INIT FILES  (OK)
+# =========================
 
-def _load_settings():
-    return _load_json(SETTINGS_PATH, {})
-
-def get_data_dir() -> str:
-    s = _load_settings()
-    return s.get("data_dir") or os.environ.get("DATA_DIR", "data")
-
-def _recompute_paths():
-    global DATA_DIR, RECORDS_PATH, AUTH_PATH, EMAILS_PATH, EMAIL_SETTINGS_PATH, EMAIL_TEMPLATES_PATH
-    DATA_DIR = get_data_dir()
-    os.makedirs(DATA_DIR, exist_ok=True)
-    RECORDS_PATH = os.path.join(DATA_DIR, "records.json")
-    AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
-    EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
-    EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
-    EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
-
-# === AUTH init (password demo) ===
 def _ensure_auth():
     data = _load_json(AUTH_PATH, {"password_sha": _sha("demo")})
     if "password_sha" not in data:
         data["password_sha"] = _sha("demo")
         _save_json(AUTH_PATH, data)
     return data
-_ensure_auth()
 
-# === EMAIL SETTINGS/TEMPLATES init ===
 def _ensure_email_files():
     _load_json(EMAIL_SETTINGS_PATH, {
         "subject": "In memoria di {{NOME}} {{COGNOME}}",
         "body": "Gentile {{NOME}} {{COGNOME}},\nTi ricordiamo con affetto in questa ricorrenza."
     })
     _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
+
+_ensure_auth()
 _ensure_email_files()
 
-def load_email_settings():
-    return _load_json(EMAIL_SETTINGS_PATH, {"subject": "", "body": ""})
+# =========================
+#  DATE HELPERS  (OK)
+# =========================
 
-def save_email_settings(data: dict):
-    _save_json(EMAIL_SETTINGS_PATH, data)
-
-def load_email_templates():
-    return _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
-
-def save_email_templates(data: dict):
-    _save_json(EMAIL_TEMPLATES_PATH, data)
-
-# === DATE HELPERS ===
 def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
     try:
-        if not s: return None
+        if not s:
+            return None
         y, m, d = map(int, s.split("-"))
         return date(y, m, d)
     except Exception:
@@ -129,25 +111,19 @@ def _today_rome_date() -> date:
     return datetime.now(TZ_ROME).date()
 
 def _add_years_safe(d: date, years: int) -> date:
-    """Aggiunge anni gestendo il 29/02 -> 28/02 se anno non bisestile."""
     try:
         return d.replace(year=d.year + years)
     except ValueError:
-        # 29/02 -> 28/02 nell'anno non bisestile
+        # 29/02 -> 28/02
         return d.replace(month=2, day=28, year=d.year + years)
 
 def _compute_first_ricorrenza(def_d: Optional[str]) -> Optional[str]:
-    """Prima ricorrenza = def_data + 1 anno."""
     gd = _parse_yyyy_mm_dd(def_d)
     if not gd:
         return None
     return _add_years_safe(gd, 1).isoformat()
 
-def _due_today(rec: dict, today: date) -> bool:
-    """
-    True se OGGI è il giorno di invio:
-    (prossima_ricorrenza - giorni_prima) == today
-    """
+def _due_today(rec: dict, day: date) -> bool:
     pr = _parse_yyyy_mm_dd(rec.get("prossima_ricorrenza"))
     gp = rec.get("giorni_prima")
     if not pr or gp is None:
@@ -156,8 +132,7 @@ def _due_today(rec: dict, today: date) -> bool:
         gp = int(gp)
     except Exception:
         return False
-    reminder = pr - timedelta(days=gp)
-    return reminder == today
+    return (pr - timedelta(days=gp)) == day
 
 def _parse_recipients(raw: Optional[str]) -> list[str]:
     if not raw:
@@ -191,7 +166,10 @@ def _load_sent() -> list:
 def _save_sent(rows: list):
     _save_json(EMAILS_PATH, rows)
 
-# === MODELS ===
+# =========================
+#  MODELS  (OK)
+# =========================
+
 class LoginRequest(BaseModel):
     email: Optional[EmailStr] = None
     password: str
@@ -216,10 +194,7 @@ class Record(BaseModel):
     giorni_prima: Optional[int] = None
     oggetto: Optional[str] = None
     corpo: Optional[str] = None
-
-    # NUOVO
     prossima_ricorrenza: Optional[str] = None
-
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     sospendi_invio: Optional[bool] = False
@@ -235,7 +210,18 @@ class EmailTemplateIn(BaseModel):
     name: str
     content: str
 
-# === CORS ===
+class SendEmailIn(BaseModel):
+    to: str
+    subject: str
+    message: str
+
+class StorageIn(BaseModel):
+    path: str
+
+# =========================
+#  MIDDLEWARE  (OK)
+# =========================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -244,17 +230,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# === HEALTH ===
+# =========================
+#  ENDPOINTS  (OK)
+# =========================
+
 @app.get("/health")
 def health():
     return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
 
-# === TEST INVIO REALE (NEW) ===
+# --- invio test singolo ---
 @app.post("/admin/send-test-email")
 def send_test_email(to: str, x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
     subject = "Test Damiano – invio email"
     html = "<div style='font-family:system-ui'>Ciao 👋<br>Questa è una mail di TEST dal backend Damiano.</div>"
     try:
@@ -263,21 +251,14 @@ def send_test_email(to: str, x_secret: Optional[str] = Header(None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Errore invio: {e}")
 
-# === GENERIC EMAIL SENDER (NEW) ===
-class SendEmailIn(BaseModel):
-    to: str         # uno o più indirizzi (separati da virgola o punto e virgola)
-    subject: str
-    message: str    # testo semplice; verrà inviato anche come HTML minimale
-
+# --- invio generico ---
 @app.post("/send-email")
 def send_email_generic(body: SendEmailIn, x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
     recipients = _parse_recipients(body.to)
     if not recipients:
         raise HTTPException(status_code=400, detail="Nessun indirizzo email valido in 'to'.")
-
     sent, failed = [], []
     for addr in recipients:
         try:
@@ -286,17 +267,14 @@ def send_email_generic(body: SendEmailIn, x_secret: Optional[str] = Header(None)
             sent.append(addr)
         except Exception as e:
             failed.append({"to": addr, "error": str(e)})
-
     return {"ok": len(failed) == 0, "sent": sent, "failed": failed}
 
-# === INVIO IMMEDIATO (con modalità test) ===
-from fastapi import Query
-
+# --- invio immediato record (test=True non avanza) ---
 @app.post("/admin/send-now/{rid}")
 def admin_send_now(
     rid: str,
     x_secret: Optional[str] = Header(None),
-    test: bool = Query(False)   # <-- se True non avanza la ricorrenza
+    test: bool = Query(False)
 ):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -306,26 +284,22 @@ def admin_send_now(
     if not rec:
         raise HTTPException(status_code=404, detail="Record non trovato")
 
-    # destinatari
     to_list = _parse_recipients(rec.get("email"))
     if not to_list:
         raise HTTPException(status_code=400, detail="Record senza email valida")
 
-    # subject/body (per-record se presenti, altrimenti globali)
     settings = load_email_settings()
     subject_raw = rec.get("oggetto") or (settings.get("subject") or "In memoria")
-    body_raw    = rec.get("corpo")   or (settings.get("body")    or "Un pensiero in questa ricorrenza.")
+    body_raw    = rec.get("corpo")   or (settings.get("Body")    or settings.get("body") or "Un pensiero in questa ricorrenza.")
     subject = _fill_placeholders(subject_raw, rec)
     body    = _fill_placeholders(body_raw, rec)
 
-    # invio reale
     try:
         html = f"<div style='font-family:system-ui; white-space:pre-wrap'>{body}</div>"
         send_email(to_list[0], subject, html, plain_fallback=body)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Errore invio: {e}")
 
-    # log invio
     sent_rows = _load_sent()
     today = _today_rome_date().isoformat()
     sent_rows.append({
@@ -336,12 +310,11 @@ def admin_send_now(
         "scheduled_for": today,
         "due_date": today,
         "sent_at": _now_iso(),
-        "stato": "test" if test else "ok",   # <-- segna test
+        "stato": "test" if test else "ok",
         "errore": None,
     })
     _save_sent(sent_rows)
 
-    # se NON test, avanza la prossima ricorrenza di 1 anno
     if not test:
         pr = _parse_yyyy_mm_dd(rec.get("prossima_ricorrenza"))
         if pr:
@@ -350,12 +323,8 @@ def admin_send_now(
 
     return {"ok": True, "record_id": rid, "test": test}
 
-# === CATCH-UP HELPERS (NEW) ===
+# --- catch-up ---
 def _already_sent(sent_log: list, record_id: Optional[str], due_date_iso: str) -> bool:
-    """
-    Ritorna True se per questo record è già stato loggato un invio
-    per la ricorrenza 'due_date_iso' (idempotenza).
-    """
     if not record_id:
         return False
     for e in sent_log:
@@ -368,16 +337,8 @@ def _date_range(d0: date, d1: date):
     while cur <= d1:
         yield cur
         cur = cur + timedelta(days=1)
-# === INVIO CON CATCH-UP (NEW) ===
+
 def send_emails_catchup():
-    """
-    Alla prima esecuzione utile, recupera e invia tutte le mail
-    non inviate dei giorni passati (tra last_run+1 e oggi) evitando duplicati.
-    Mantiene lo stesso comportamento della /admin/send-due-emails:
-    - usa subject/body per-record se presenti, altrimenti globali
-    - avanza 'prossima_ricorrenza' di +1 anno quando invia
-    - logga in sent_emails.json
-    """
     today = _today_rome_date()
     records = load_records()
     sent_rows = _load_sent()
@@ -386,7 +347,6 @@ def send_emails_catchup():
     default_subject = settings.get("subject") or "In memoria"
     default_body    = settings.get("body") or "Un pensiero in questa ricorrenza."
 
-    # intervallo: (last_run + 1) .. today
     last_run_day = load_last_run_date()
     start_day = last_run_day + timedelta(days=1)
 
@@ -394,18 +354,14 @@ def send_emails_catchup():
 
     for day in _date_range(start_day, today):
         day_iso = day.isoformat()
-
         for r in records:
             try:
                 if r.get("sospendi_invio") is True:
                     continue
-                # Ricicliamo la logica già esistente: "è dovuto in questo giorno?"
                 if not _due_today(r, day):
                     continue
-
                 rid = r.get("id")
                 if _already_sent(sent_rows, rid, day_iso):
-                    # già loggata per quella ricorrenza -> salta (idempotenza)
                     continue
 
                 to_list = _parse_recipients(r.get("email"))
@@ -418,12 +374,8 @@ def send_emails_catchup():
                 subject = _fill_placeholders(subject_raw, r)
                 body    = _fill_placeholders(body_raw, r)
 
-                # --- qui puoi passare a invio reale con send_email(...) se vuoi ---
-                # Esempio (HTML semplice = body, fallback = body):
-                # send_email(to_list[0], subject, f"<pre>{body}</pre>", plain_fallback=body)
-
-                # Per ora manteniamo stesso comportamento della tua rotta: log simulato
-                log_row = {
+                # (qui potresti usare send_email per invio reale)
+                sent_rows.append({
                     "record_id": rid,
                     "to": to_list,
                     "subject": subject,
@@ -433,15 +385,13 @@ def send_emails_catchup():
                     "def_nome": r.get("def_nome"),
                     "def_cognome": r.get("def_cognome"),
                     "scheduled_for": day_iso,
-                    "due_date": day_iso,              # <-- chiave per anti-duplicato
+                    "due_date": day_iso,
                     "sent_at": _now_iso(),
                     "stato": "ok",
                     "errore": None,
-                }
-                sent_rows.append(log_row)
+                })
                 processed.append({"id": rid, "to": to_list, "due_date": day_iso})
 
-                # Avanza la prossima ricorrenza di +1 anno (coerente con /admin/send-due-emails)
                 pr = _parse_yyyy_mm_dd(r.get("prossima_ricorrenza"))
                 if pr:
                     r["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
@@ -449,11 +399,8 @@ def send_emails_catchup():
             except Exception as e:
                 errors.append({"id": r.get("id"), "due_date": day_iso, "error": str(e)})
 
-    # salva aggiornamenti (ricorrenze avanzate) + log
     save_records(records)
     _save_sent(sent_rows)
-
-    # aggiorna il last_run
     save_last_run_now()
 
     return {
@@ -463,18 +410,14 @@ def send_emails_catchup():
         "skipped": skipped,
         "errors": errors,
     }
-# === SCHEDULER: CATCH-UP ENDPOINT (NEW) ===
+
 @app.post("/admin/catchup")
 def run_catchup(x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return send_emails_catchup()
-# --- STORAGE: scelta cartella dati (area sviluppatore) ---
-# (da incollare dopo /admin/catchup e prima di # === HELPERS RECORDS ===)
 
-class StorageIn(BaseModel):
-    path: str
-
+# --- ADMIN STORAGE (nuovo) ---
 @app.get("/admin/storage")
 def admin_get_storage(x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
@@ -494,16 +437,14 @@ def admin_set_storage(body: StorageIn, x_secret: Optional[str] = Header(None)):
     if not new_dir:
         raise HTTPException(status_code=400, detail="Percorso non valido")
 
-    # crea cartella se non esiste
     try:
         os.makedirs(new_dir, exist_ok=True)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Impossibile creare cartella: {e}")
 
-    # migrazione file noti dalla vecchia cartella (se diversa)
     old_dir = DATA_DIR
     if os.path.isdir(old_dir) and os.path.abspath(old_dir) != new_dir:
-        for name in ["records.json","auth.json","sent_emails.json","email_settings.json","email_templates.json"]:
+        for name in ["records.json", "auth.json", "sent_emails.json", "email_settings.json", "email_templates.json"]:
             src = os.path.join(old_dir, name)
             dst = os.path.join(new_dir, name)
             if os.path.exists(src) and not os.path.exists(dst):
@@ -512,17 +453,18 @@ def admin_set_storage(body: StorageIn, x_secret: Optional[str] = Header(None)):
                 except Exception:
                     pass
 
-    # salva scelta e ricalcola le path globali
     s = _load_settings()
     s["data_dir"] = new_dir
     _save_json(SETTINGS_PATH, s)
 
     _recompute_paths()
     _ensure_email_files()
-
     return {"ok": True, "data_dir": DATA_DIR}
 
-# === HELPERS RECORDS ===
+# =========================
+#  HELPERS RECORDS & CRUD
+# =========================
+
 def load_records() -> List[dict]:
     data = _load_json(RECORDS_PATH, [])
     changed = False
@@ -533,7 +475,6 @@ def load_records() -> List[dict]:
             r["created_at"] = _now_iso(); changed = True
         if not r.get("updated_at"):
             r["updated_at"] = r["created_at"]; changed = True
-        # MIGRAZIONE: se manca prossima_ricorrenza ma c'è def_data -> calcola
         if not r.get("prossima_ricorrenza") and r.get("def_data"):
             pr = _compute_first_ricorrenza(r.get("def_data"))
             if pr:
@@ -546,7 +487,7 @@ def load_records() -> List[dict]:
 def save_records(data: List[dict]):
     _save_json(RECORDS_PATH, data)
 
-# === AUTH ===
+# --- AUTH ---
 @app.post("/auth/login", response_model=LoginResponse)
 def login(body: LoginRequest):
     auth = _ensure_auth()
@@ -565,7 +506,7 @@ def change_password(body: ChangePassword):
     _save_json(AUTH_PATH, auth)
     return {"ok": True}
 
-# === RECORDS CRUD ===
+# --- RECORDS CRUD ---
 @app.get("/records")
 def list_records():
     return load_records()
@@ -583,29 +524,21 @@ def create_record(rec: Record):
     data = load_records()
     now = _now_iso()
 
-    # Duplicate se coincidono: persona + defunto (normalizzati)
     for r in data:
-        if (
-            _norm(r.get("nome")) == _norm(rec.nome) and
+        if (_norm(r.get("nome")) == _norm(rec.nome) and
             _norm(r.get("cognome")) == _norm(rec.cognome) and
             _norm(r.get("email")) == _norm(rec.email) and
             _norm(r.get("telefono_numero")) == _norm(rec.telefono_numero) and
             _norm(r.get("def_nome")) == _norm(rec.def_nome) and
-            _norm(r.get("def_cognome")) == _norm(rec.def_cognome)
-            # volendo aggiungere anche la data del decesso, decommentare:
-            # and _norm(r.get("def_data")) == _norm(rec.def_data)
-        ):
+            _norm(r.get("def_cognome")) == _norm(rec.def_cognome)):
             raise HTTPException(status_code=409, detail="Contatto duplicato")
 
     obj = rec.model_dump()
     obj["id"] = uuid.uuid4().hex
     obj["created_at"] = now
     obj["updated_at"] = now
-
-    # Imposta la prima ricorrenza se possibile
     if not obj.get("prossima_ricorrenza"):
         obj["prossima_ricorrenza"] = _compute_first_ricorrenza(obj.get("def_data"))
-
     data.append(obj)
     save_records(data)
     return obj
@@ -619,11 +552,8 @@ def update_record(rid: str, rec: Record):
             incoming = rec.model_dump()
             incoming["id"] = rid
             updated.update(incoming)
-
-            # Se la def_data è cambiata -> reset prima ricorrenza = def_data + 1 anno
             if incoming.get("def_data") != r.get("def_data"):
                 updated["prossima_ricorrenza"] = _compute_first_ricorrenza(incoming.get("def_data"))
-
             updated["updated_at"] = _now_iso()
             data[i] = updated
             save_records(data)
@@ -635,13 +565,14 @@ def update_record(rid: str, rec: Record):
 def emails_sent():
     sample = _load_json(EMAILS_PATH, [
         {"to":"luca.rossi@example.com","subject":"Benvenuto","sent_at":"2025-08-01T10:00:00Z","status":"ok"},
-        {"to":"sara.bianchi@example.com","subject":"Aggiornamento","sent_at":"2025-08-05T15:30:00Z","status":"ok"}
+        {"to":"sara.bianchi@example.com","subject":"Aggiornamento","sent_at":"2025-08-05T15:30:00Z","status":"ok"},
     ])
     return {"emails": sample}
 
-# === EMAIL: SETTINGS ===
+# --- EMAIL SETTINGS/TEMPLATES ---
 @app.get("/api/email/settings")
 def get_email_settings():
+    s = _ensure_email_files() or load_email_settings()
     s = load_email_settings()
     return {
         "subject": s.get("subject", ""),
@@ -650,6 +581,18 @@ def get_email_settings():
         "body_template_id": s.get("body_template_id"),
         "updated_at": s.get("updated_at"),
     }
+
+def load_email_settings():
+    return _load_json(EMAIL_SETTINGS_PATH, {"subject": "", "body": ""})
+
+def save_email_settings(data: dict):
+    _save_json(EMAIL_SETTINGS_PATH, data)
+
+def load_email_templates():
+    return _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
+
+def save_email_templates(data: dict):
+    _save_json(EMAIL_TEMPLATES_PATH, data)
 
 @app.put("/api/email/settings")
 def update_email_settings(body: EmailSettingsIn):
@@ -662,11 +605,10 @@ def update_email_settings(body: EmailSettingsIn):
     save_email_settings(s)
     return {"ok": True}
 
-# === EMAIL: TEMPLATES ===
 @app.get("/api/email/templates")
 def list_email_templates(type: str):
     if type not in ("subject", "body"):
-        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'" )
+        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
     alltpl = load_email_templates()
     return alltpl.get(type, [])
 
@@ -694,7 +636,7 @@ def create_email_template(tpl: EmailTemplateIn):
 @app.delete("/api/email/templates/{tid}")
 def delete_email_template(tid: str, type: str = Query(...)):
     if type not in ("subject", "body"):
-        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'" )
+        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
     tpls = load_email_templates()
     arr = tpls.get(type, [])
     new_arr = [x for x in arr if x.get("id") != tid]
@@ -709,6 +651,7 @@ def delete_email_template(tid: str, type: str = Query(...)):
         s["body_template_id"] = None
     save_email_settings(s)
     return {"ok": True, "deleted_id": tid, "type": type}
+
 
 
 
