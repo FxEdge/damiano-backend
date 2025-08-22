@@ -452,7 +452,9 @@ def run_catchup(x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return send_emails_catchup()
-# === ADMIN: STORAGE PATH (leggi/imposta cartella dati) ===
+# --- STORAGE: scelta cartella dati (area sviluppatore) ---
+# (da incollare dopo /admin/catchup e prima di # === HELPERS RECORDS ===)
+
 class StorageIn(BaseModel):
     path: str
 
@@ -460,10 +462,8 @@ class StorageIn(BaseModel):
 def admin_get_storage(x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    files = []
     try:
-        if os.path.isdir(DATA_DIR):
-            files = sorted(os.listdir(DATA_DIR))
+        files = sorted(os.listdir(DATA_DIR)) if os.path.isdir(DATA_DIR) else []
     except Exception:
         files = []
     return {"data_dir": DATA_DIR, "files": files}
@@ -473,19 +473,20 @@ def admin_set_storage(body: StorageIn, x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    if not body.path or not str(body.path).strip():
+    new_dir = os.path.abspath((body.path or "").strip())
+    if not new_dir:
         raise HTTPException(status_code=400, detail="Percorso non valido")
 
-    new_dir = os.path.abspath(str(body.path).strip())
+    # crea cartella se non esiste
     try:
         os.makedirs(new_dir, exist_ok=True)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Impossibile creare cartella: {e}")
 
+    # migrazione file noti dalla vecchia cartella (se diversa)
     old_dir = DATA_DIR
-    # migra i file noti se non esistono già nella nuova cartella
     if os.path.isdir(old_dir) and os.path.abspath(old_dir) != new_dir:
-        for name in ["records.json", "auth.json", "sent_emails.json", "email_settings.json", "email_templates.json"]:
+        for name in ["records.json","auth.json","sent_emails.json","email_settings.json","email_templates.json"]:
             src = os.path.join(old_dir, name)
             dst = os.path.join(new_dir, name)
             if os.path.exists(src) and not os.path.exists(dst):
@@ -494,13 +495,13 @@ def admin_set_storage(body: StorageIn, x_secret: Optional[str] = Header(None)):
                 except Exception:
                     pass
 
-    # salva scelta in settings e ricalcola le path globali
+    # salva scelta e ricalcola le path globali
     s = _load_settings()
     s["data_dir"] = new_dir
     _save_json(SETTINGS_PATH, s)
 
     _recompute_paths()
-    _ensure_email_files()  # assicura i file minimi nella nuova cartella
+    _ensure_email_files()
 
     return {"ok": True, "data_dir": DATA_DIR}
 
