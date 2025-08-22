@@ -253,62 +253,66 @@ def send_email_generic(body: SendEmailIn, x_secret: Optional[str] = Header(None)
 
     return {"ok": len(failed) == 0, "sent": sent, "failed": failed}
 
-# === INVIO IMMEDIATO DI UN SINGOLO CONTATTO (NEW) ===
+# === INVIO IMMEDIATO (con modalità test) ===
+from fastapi import Query
+
 @app.post("/admin/send-now/{rid}")
-def send_now(rid: str, advance: int = 0, x_secret: Optional[str] = Header(None)):
-    """
-    Invia SUBITO l'email per il record 'rid', bypassando i controlli di ricorrenza.
-    Parametri: advance=1 per avanzare 'prossima_ricorrenza' di +1 anno (default 0).
-    """
+def admin_send_now(
+    rid: str,
+    x_secret: Optional[str] = Header(None),
+    test: bool = Query(False)   # <-- se True non avanza la ricorrenza
+):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     records = load_records()
-    rec = next((x for x in records if x.get("id") == rid), None)
+    rec = next((r for r in records if r.get("id") == rid), None)
     if not rec:
         raise HTTPException(status_code=404, detail="Record non trovato")
 
+    # destinatari
     to_list = _parse_recipients(rec.get("email"))
     if not to_list:
         raise HTTPException(status_code=400, detail="Record senza email valida")
 
+    # subject/body (per-record se presenti, altrimenti globali)
     settings = load_email_settings()
-    subject_raw = rec.get("oggetto") or settings.get("subject") or "In memoria"
-    body_raw    = rec.get("corpo")   or settings.get("body")    or "Un pensiero in questa ricorrenza."
+    subject_raw = rec.get("oggetto") or (settings.get("subject") or "In memoria")
+    body_raw    = rec.get("corpo")   or (settings.get("body")    or "Un pensiero in questa ricorrenza.")
     subject = _fill_placeholders(subject_raw, rec)
-    body    = _fill_placeholders(body_raw,  rec)
+    body    = _fill_placeholders(body_raw, rec)
 
+    # invio reale
     try:
-        send_email(to_list[0], subject, f"<div style='white-space:pre-wrap'>{body}</div>", plain_fallback=body)
+        html = f"<div style='font-family:system-ui; white-space:pre-wrap'>{body}</div>"
+        send_email(to_list[0], subject, html, plain_fallback=body)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore invio SMTP: {e}")
+        raise HTTPException(status_code=500, detail=f"Errore invio: {e}")
 
+    # log invio
     sent_rows = _load_sent()
-    today_iso = _today_rome_date().isoformat()
+    today = _today_rome_date().isoformat()
     sent_rows.append({
-        "record_id": rec.get("id"),
+        "record_id": rid,
         "to": to_list,
         "subject": subject,
         "body_usato": body,
-        "nome": rec.get("nome"),
-        "cognome": rec.get("cognome"),
-        "def_nome": rec.get("def_nome"),
-        "def_cognome": rec.get("def_cognome"),
-        "scheduled_for": today_iso,
-        "due_date": today_iso,
+        "scheduled_for": today,
+        "due_date": today,
         "sent_at": _now_iso(),
-        "stato": "ok",
+        "stato": "test" if test else "ok",   # <-- segna test
         "errore": None,
     })
     _save_sent(sent_rows)
 
-    if int(advance) == 1:
+    # se NON test, avanza la prossima ricorrenza di 1 anno
+    if not test:
         pr = _parse_yyyy_mm_dd(rec.get("prossima_ricorrenza"))
         if pr:
             rec["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
             save_records(records)
 
-    return {"ok": True, "record_id": rid, "to": to_list, "advanced": int(advance) == 1}
+    return {"ok": True, "record_id": rid, "test": test}
 
 # === CATCH-UP HELPERS (NEW) ===
 def _already_sent(sent_log: list, record_id: Optional[str], due_date_iso: str) -> bool:
