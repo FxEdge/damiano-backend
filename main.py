@@ -452,6 +452,57 @@ def run_catchup(x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     return send_emails_catchup()
+# === ADMIN: STORAGE PATH (leggi/imposta cartella dati) ===
+class StorageIn(BaseModel):
+    path: str
+
+@app.get("/admin/storage")
+def admin_get_storage(x_secret: Optional[str] = Header(None)):
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    files = []
+    try:
+        if os.path.isdir(DATA_DIR):
+            files = sorted(os.listdir(DATA_DIR))
+    except Exception:
+        files = []
+    return {"data_dir": DATA_DIR, "files": files}
+
+@app.put("/admin/storage")
+def admin_set_storage(body: StorageIn, x_secret: Optional[str] = Header(None)):
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not body.path or not str(body.path).strip():
+        raise HTTPException(status_code=400, detail="Percorso non valido")
+
+    new_dir = os.path.abspath(str(body.path).strip())
+    try:
+        os.makedirs(new_dir, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Impossibile creare cartella: {e}")
+
+    old_dir = DATA_DIR
+    # migra i file noti se non esistono già nella nuova cartella
+    if os.path.isdir(old_dir) and os.path.abspath(old_dir) != new_dir:
+        for name in ["records.json", "auth.json", "sent_emails.json", "email_settings.json", "email_templates.json"]:
+            src = os.path.join(old_dir, name)
+            dst = os.path.join(new_dir, name)
+            if os.path.exists(src) and not os.path.exists(dst):
+                try:
+                    shutil.copy2(src, dst)
+                except Exception:
+                    pass
+
+    # salva scelta in settings e ricalcola le path globali
+    s = _load_settings()
+    s["data_dir"] = new_dir
+    _save_json(SETTINGS_PATH, s)
+
+    _recompute_paths()
+    _ensure_email_files()  # assicura i file minimi nella nuova cartella
+
+    return {"ok": True, "data_dir": DATA_DIR}
 
 # === HELPERS RECORDS ===
 def load_records() -> List[dict]:
