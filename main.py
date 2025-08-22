@@ -17,6 +17,7 @@ app = FastAPI(title="Damiano API", version=APP_VERSION)
 
 # === CONFIG / STORAGE ===
 import shutil
+import os, json
 
 # file di settings per ricordare la cartella scelta anche ai riavvii
 SETTINGS_PATH = os.environ.get("SETTINGS_PATH", "app_settings.json")
