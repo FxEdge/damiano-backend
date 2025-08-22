@@ -46,13 +46,6 @@ _recompute_paths()  # inizializza una volta
 # --- CONFIG GLOBALI ---
 SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
 TZ_ROME = ZoneInfo("Europe/Rome")
-
-def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-def _sha(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
 def _load_json(path: str, default):
     if not os.path.exists(path):
         with open(path, "w", encoding="utf-8") as f:
@@ -64,10 +57,38 @@ def _load_json(path: str, default):
 def _save_json(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-_recompute_paths()
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def _sha(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
 def _norm(s: Optional[str]) -> str:
     """Normalizza per confronto: toglie spazi e rende minuscolo."""
     return (s or "").strip().lower()
+import shutil
+
+SETTINGS_PATH = os.environ.get("SETTINGS_PATH", "app_settings.json")
+
+def _load_settings():
+    return _load_json(SETTINGS_PATH, {})
+
+def get_data_dir() -> str:
+    s = _load_settings()
+    return s.get("data_dir") or os.environ.get("DATA_DIR", "data")
+
+def _recompute_paths():
+    global DATA_DIR, RECORDS_PATH, AUTH_PATH, EMAILS_PATH, EMAIL_SETTINGS_PATH, EMAIL_TEMPLATES_PATH
+    DATA_DIR = get_data_dir()
+    os.makedirs(DATA_DIR, exist_ok=True)
+    RECORDS_PATH = os.path.join(DATA_DIR, "records.json")
+    AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
+    EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
+    EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
+    EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
+
+# >>> CHIAMA QUI, dopo la definizione della funzione <<<
+_recompute_paths()
 
 # === AUTH init (password demo) ===
 def _ensure_auth():
