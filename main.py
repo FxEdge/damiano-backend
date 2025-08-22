@@ -1,656 +1,255 @@
-from fastapi import FastAPI, HTTPException, Query, Header
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
-from typing import Optional, List
-from datetime import datetime, timezone, date, timedelta
-from zoneinfo import ZoneInfo
-import os, json, uuid, hashlib, re, shutil
-
-# servizi email
-from email_service import send_email, render_template  # render_template non usato ma ok importarlo
-# scheduler utils
-from utils_scheduler import load_last_run_date, save_last_run_now, _now_date
-
-APP_VERSION = "1.1.0"
-app = FastAPI(title="Damiano API", version=APP_VERSION)
-
-# =========================
-#  STORAGE / CONFIG  (OK)
-# =========================
-
-def _load_json(path: str, default):
-    if not os.path.exists(path):
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, ensure_ascii=False, indent=2)
-        return default
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def _save_json(path: str, data):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# file settings per ricordare la cartella scelta
-SETTINGS_PATH = os.environ.get("SETTINGS_PATH", "app_settings.json")
-
-def _load_settings():
-    return _load_json(SETTINGS_PATH, {})
-
-def get_data_dir() -> str:
-    """Priorità: setting salvato -> ENV DATA_DIR -> 'data'"""
-    s = _load_settings()
-    return s.get("data_dir") or os.environ.get("DATA_DIR", "data")
-
-def _recompute_paths():
-    """(Ri)calcola tutte le path quando cambia la cartella dati."""
-    global DATA_DIR, RECORDS_PATH, AUTH_PATH, EMAILS_PATH, EMAIL_SETTINGS_PATH, EMAIL_TEMPLATES_PATH
-    DATA_DIR = get_data_dir()
-    os.makedirs(DATA_DIR, exist_ok=True)
-    RECORDS_PATH = os.path.join(DATA_DIR, "records.json")
-    AUTH_PATH = os.path.join(DATA_DIR, "auth.json")
-    EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
-    EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
-    EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
-
-# inizializza subito i percorsi
-_recompute_paths()
-
-# =========================
-#  GLOBAL / UTILS  (OK)
-# =========================
-
-SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")
-TZ_ROME = ZoneInfo("Europe/Rome")
-
-def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-def _sha(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-def _norm(s: Optional[str]) -> str:
-    return (s or "").strip().lower()
-
-# =========================
-#  INIT FILES  (OK)
-# =========================
-
-def _ensure_auth():
-    data = _load_json(AUTH_PATH, {"password_sha": _sha("demo")})
-    if "password_sha" not in data:
-        data["password_sha"] = _sha("demo")
-        _save_json(AUTH_PATH, data)
-    return data
-
-def _ensure_email_files():
-    _load_json(EMAIL_SETTINGS_PATH, {
-        "subject": "In memoria di {{NOME}} {{COGNOME}}",
-        "body": "Gentile {{NOME}} {{COGNOME}},\nTi ricordiamo con affetto in questa ricorrenza."
-    })
-    _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
-
-_ensure_auth()
-_ensure_email_files()
-
-# =========================
-#  DATE HELPERS  (OK)
-# =========================
-
-def _parse_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
-    try:
-        if not s:
-            return None
-        y, m, d = map(int, s.split("-"))
-        return date(y, m, d)
-    except Exception:
-        return None
-
-def _today_rome_date() -> date:
-    return datetime.now(TZ_ROME).date()
-
-def _add_years_safe(d: date, years: int) -> date:
-    try:
-        return d.replace(year=d.year + years)
-    except ValueError:
-        # 29/02 -> 28/02
-        return d.replace(month=2, day=28, year=d.year + years)
-
-def _compute_first_ricorrenza(def_d: Optional[str]) -> Optional[str]:
-    gd = _parse_yyyy_mm_dd(def_d)
-    if not gd:
-        return None
-    return _add_years_safe(gd, 1).isoformat()
-
-def _due_today(rec: dict, day: date) -> bool:
-    pr = _parse_yyyy_mm_dd(rec.get("prossima_ricorrenza"))
-    gp = rec.get("giorni_prima")
-    if not pr or gp is None:
-        return False
-    try:
-        gp = int(gp)
-    except Exception:
-        return False
-    return (pr - timedelta(days=gp)) == day
-
-def _parse_recipients(raw: Optional[str]) -> list[str]:
-    if not raw:
-        return []
-    for sep in [",", ";"]:
-        raw = raw.replace(sep, " ")
-    parts = [t.strip() for t in raw.split() if "@" in t and "." in t]
-    seen, out = set(), []
-    for x in parts:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
-def _fill_placeholders(text: str, rec: dict) -> str:
-    rep = {
-        "{{NOME}}": rec.get("nome") or "",
-        "{{COGNOME}}": rec.get("cognome") or "",
-        "{{DEF_NOME}}": rec.get("def_nome") or "",
-        "{{DEF_COGNOME}}": rec.get("def_cognome") or "",
-        "{{DATA_DEF}}": rec.get("def_data") or "",
-        "{{DATA_RIC}}": rec.get("prossima_ricorrenza") or "",
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <title>Area Sviluppatore – Damiano</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --primary:#2563eb; --bg:#f6f7fb; --card:#fff; --muted:#6b7280; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); }
+    .wrap { max-width: 1000px; margin: 40px auto; padding: 0 16px; }
+    .card { background:var(--card); border-radius:16px; box-shadow: 0 8px 30px rgba(0,0,0,.06); padding:20px; }
+    h1 { margin:0 0 16px; font-size: 24px; }
+    h2 { margin:20px 0 10px; font-size: 18px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin: 12px 0 18px; }
+    label { font-size:14px; color:var(--muted); }
+    input[type="text"], input[type="password"], input[type="url"] {
+      padding:10px 12px; border:1px solid #e5e7eb; border-radius:10px; min-width: 260px;
     }
-    for k, v in rep.items():
-        text = (text or "").replace(k, v)
-    return text
+    button {
+      padding:10px 14px; border:0; border-radius:10px; background:var(--primary); color:#fff; cursor:pointer;
+    }
+    button.ghost { background:#e5e7eb; color:#111827; }
+    table { width:100%; border-collapse:collapse; margin-top:10px; }
+    th, td { padding:10px 8px; border-bottom:1px solid #eee; text-align:left; font-size:14px; }
+    th { color:#111827; }
+    td small { color:var(--muted); }
+    .right { text-align:right; }
+    .badge { font-size:12px; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; }
+    #status { margin-top:10px; font-size:14px; }
+    .ok { color:#15803d; } .err{ color:#b91c1c; }
 
-def _load_sent() -> list:
-    return _load_json(EMAILS_PATH, [])
+    .storage-box { border:1px dashed #e5e7eb; border-radius:12px; padding:12px; background:#fafbff; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>⚙️ Area Sviluppatore</h1>
 
-def _save_sent(rows: list):
-    _save_json(EMAILS_PATH, rows)
+      <!-- Connessione backend -->
+      <div class="row">
+        <div>
+          <label>Backend URL</label><br />
+          <input id="baseUrl" type="url" placeholder="https://damiano-backend-xxx.onrender.com" />
+        </div>
+        <div>
+          <label>X-Secret</label><br />
+          <input id="xSecret" type="password" placeholder="admin secret" />
+        </div>
+        <div>
+          <br />
+          <button id="saveBtn">Salva</button>
+          <button class="ghost" id="refreshBtn">Aggiorna contatti</button>
+        </div>
+      </div>
 
-# =========================
-#  MODELS  (OK)
-# =========================
+      <div id="status"></div>
 
-class LoginRequest(BaseModel):
-    email: Optional[EmailStr] = None
-    password: str
+      <!-- Pannello STORAGE -->
+      <h2>📁 Percorso di salvataggio</h2>
+      <div class="storage-box">
+        <div class="row" style="margin:0 0 8px">
+          <button id="btnReadStorage" class="ghost">📁 Leggi percorso</button>
+          <button id="btnSetStorage">✏️ Imposta percorso…</button>
+        </div>
+        <div id="storageInfo">
+          <div><small class="mono">data_dir: <span id="curDir">—</span></small></div>
+          <div style="margin-top:6px">
+            <small class="mono">files: <span id="curFiles">—</span></small>
+          </div>
+        </div>
+        <div style="margin-top:8px;color:#6b7280;font-size:13px">
+          Suggerimenti: su Render usare percorsi <em>del server</em>, es. <span class="mono">/tmp/damiano-data</span> (non persistente) oppure un
+          disco montato, es. <span class="mono">/var/damiano-data</span> (persistente).
+        </div>
+      </div>
 
-class LoginResponse(BaseModel):
-    token: str
+      <!-- Tabella contatti -->
+      <h2>Contatti</h2>
+      <table id="tbl">
+        <thead>
+          <tr>
+            <th>Nome</th>
+            <th>Email</th>
+            <th>Prossima ricorrenza</th>
+            <th class="right">Azione</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="4"><small>Caricamento contatti…</small></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 
-class ChangePassword(BaseModel):
-    old_password: str
-    new_password: str
+  <script>
+    const el = (id) => document.getElementById(id);
+    const LS_BASE = "dev_base_url";
+    const LS_SECRET = "dev_x_secret";
 
-class Record(BaseModel):
-    id: Optional[str] = None
-    nome: str = ""
-    cognome: str = ""
-    telefono_prefisso: Optional[str] = "+39"
-    telefono_numero: Optional[str] = None
-    email: Optional[EmailStr] = None
-    def_nome: Optional[str] = None
-    def_cognome: Optional[str] = None
-    def_data: Optional[str] = None
-    giorni_prima: Optional[int] = None
-    oggetto: Optional[str] = None
-    corpo: Optional[str] = None
-    prossima_ricorrenza: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    sospendi_invio: Optional[bool] = False
+    // Defaults
+    el("baseUrl").value = localStorage.getItem(LS_BASE) || "https://damiano-backend-ancz.onrender.com";
+    el("xSecret").value = localStorage.getItem(LS_SECRET) || "";
 
-class EmailSettingsIn(BaseModel):
-    subject: Optional[str] = None
-    body: Optional[str] = None
-    subject_template_id: Optional[str] = None
-    body_template_id: Optional[str] = None
+    const getBase = () => el("baseUrl").value.trim().replace(/\/+$/,'');
+    const getSecret = () => el("xSecret").value;
 
-class EmailTemplateIn(BaseModel):
-    type: str  # 'subject' | 'body'
-    name: str
-    content: str
+    el("saveBtn").addEventListener("click", () => {
+      localStorage.setItem(LS_BASE, getBase());
+      localStorage.setItem(LS_SECRET, getSecret());
+      setStatus("Impostazioni salvate ✔️", true);
+      loadRecords();
+      readStorage();
+    });
 
-class SendEmailIn(BaseModel):
-    to: str
-    subject: str
-    message: str
+    el("refreshBtn").addEventListener("click", () => loadRecords());
+    el("btnReadStorage").addEventListener("click", () => readStorage());
+    el("btnSetStorage").addEventListener("click", () => setStorage());
 
-class StorageIn(BaseModel):
-    path: str
-
-# =========================
-#  MIDDLEWARE  (OK)
-# =========================
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# =========================
-#  ENDPOINTS  (OK)
-# =========================
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
-
-# --- invio test singolo ---
-@app.post("/admin/send-test-email")
-def send_test_email(to: str, x_secret: Optional[str] = Header(None)):
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    subject = "Test Damiano – invio email"
-    html = "<div style='font-family:system-ui'>Ciao 👋<br>Questa è una mail di TEST dal backend Damiano.</div>"
-    try:
-        send_email(to, subject, html, plain_fallback="Ciao, questa è una mail di TEST dal backend Damiano.")
-        return {"ok": True, "to": to}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore invio: {e}")
-
-# --- invio generico ---
-@app.post("/send-email")
-def send_email_generic(body: SendEmailIn, x_secret: Optional[str] = Header(None)):
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    recipients = _parse_recipients(body.to)
-    if not recipients:
-        raise HTTPException(status_code=400, detail="Nessun indirizzo email valido in 'to'.")
-    sent, failed = [], []
-    for addr in recipients:
-        try:
-            html = f"<div style='font-family:system-ui; white-space:pre-wrap'>{body.message}</div>"
-            send_email(addr, body.subject, html, plain_fallback=body.message)
-            sent.append(addr)
-        except Exception as e:
-            failed.append({"to": addr, "error": str(e)})
-    return {"ok": len(failed) == 0, "sent": sent, "failed": failed}
-
-# --- invio immediato record (test=True non avanza) ---
-@app.post("/admin/send-now/{rid}")
-def admin_send_now(
-    rid: str,
-    x_secret: Optional[str] = Header(None),
-    test: bool = Query(False)
-):
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    records = load_records()
-    rec = next((r for r in records if r.get("id") == rid), None)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Record non trovato")
-
-    to_list = _parse_recipients(rec.get("email"))
-    if not to_list:
-        raise HTTPException(status_code=400, detail="Record senza email valida")
-
-    settings = load_email_settings()
-    subject_raw = rec.get("oggetto") or (settings.get("subject") or "In memoria")
-    body_raw    = rec.get("corpo")   or (settings.get("Body")    or settings.get("body") or "Un pensiero in questa ricorrenza.")
-    subject = _fill_placeholders(subject_raw, rec)
-    body    = _fill_placeholders(body_raw, rec)
-
-    try:
-        html = f"<div style='font-family:system-ui; white-space:pre-wrap'>{body}</div>"
-        send_email(to_list[0], subject, html, plain_fallback=body)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore invio: {e}")
-
-    sent_rows = _load_sent()
-    today = _today_rome_date().isoformat()
-    sent_rows.append({
-        "record_id": rid,
-        "to": to_list,
-        "subject": subject,
-        "body_usato": body,
-        "scheduled_for": today,
-        "due_date": today,
-        "sent_at": _now_iso(),
-        "stato": "test" if test else "ok",
-        "errore": None,
-    })
-    _save_sent(sent_rows)
-
-    if not test:
-        pr = _parse_yyyy_mm_dd(rec.get("prossima_ricorrenza"))
-        if pr:
-            rec["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
-            save_records(records)
-
-    return {"ok": True, "record_id": rid, "test": test}
-
-# --- catch-up ---
-def _already_sent(sent_log: list, record_id: Optional[str], due_date_iso: str) -> bool:
-    if not record_id:
-        return False
-    for e in sent_log:
-        if e.get("record_id") == record_id and e.get("due_date") == due_date_iso:
-            return True
-    return False
-
-def _date_range(d0: date, d1: date):
-    cur = d0
-    while cur <= d1:
-        yield cur
-        cur = cur + timedelta(days=1)
-
-def send_emails_catchup():
-    today = _today_rome_date()
-    records = load_records()
-    sent_rows = _load_sent()
-
-    settings = load_email_settings()
-    default_subject = settings.get("subject") or "In memoria"
-    default_body    = settings.get("body") or "Un pensiero in questa ricorrenza."
-
-    last_run_day = load_last_run_date()
-    start_day = last_run_day + timedelta(days=1)
-
-    processed, skipped, errors = [], [], []
-
-    for day in _date_range(start_day, today):
-        day_iso = day.isoformat()
-        for r in records:
-            try:
-                if r.get("sospendi_invio") is True:
-                    continue
-                if not _due_today(r, day):
-                    continue
-                rid = r.get("id")
-                if _already_sent(sent_rows, rid, day_iso):
-                    continue
-
-                to_list = _parse_recipients(r.get("email"))
-                if not to_list:
-                    skipped.append({"id": rid, "reason": "no_email", "due_date": day_iso})
-                    continue
-
-                subject_raw = r.get("oggetto") or default_subject
-                body_raw    = r.get("corpo")   or default_body
-                subject = _fill_placeholders(subject_raw, r)
-                body    = _fill_placeholders(body_raw, r)
-
-                # (qui potresti usare send_email per invio reale)
-                sent_rows.append({
-                    "record_id": rid,
-                    "to": to_list,
-                    "subject": subject,
-                    "body_usato": body,
-                    "nome": r.get("nome"),
-                    "cognome": r.get("cognome"),
-                    "def_nome": r.get("def_nome"),
-                    "def_cognome": r.get("def_cognome"),
-                    "scheduled_for": day_iso,
-                    "due_date": day_iso,
-                    "sent_at": _now_iso(),
-                    "stato": "ok",
-                    "errore": None,
-                })
-                processed.append({"id": rid, "to": to_list, "due_date": day_iso})
-
-                pr = _parse_yyyy_mm_dd(r.get("prossima_ricorrenza"))
-                if pr:
-                    r["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
-
-            except Exception as e:
-                errors.append({"id": r.get("id"), "due_date": day_iso, "error": str(e)})
-
-    save_records(records)
-    _save_sent(sent_rows)
-    save_last_run_now()
-
-    return {
-        "processed_range": [start_day.isoformat(), today.isoformat()],
-        "counts": {"processed": len(processed), "skipped": len(skipped), "errors": len(errors)},
-        "processed": processed,
-        "skipped": skipped,
-        "errors": errors,
+    function setStatus(msg, ok=false){
+      el("status").className = ok ? "ok" : "err";
+      el("status").textContent = msg;
     }
 
-@app.post("/admin/catchup")
-def run_catchup(x_secret: Optional[str] = Header(None)):
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    return send_emails_catchup()
-
-# --- ADMIN STORAGE (nuovo) ---
-@app.get("/admin/storage")
-def admin_get_storage(x_secret: Optional[str] = Header(None)):
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        files = sorted(os.listdir(DATA_DIR)) if os.path.isdir(DATA_DIR) else []
-    except Exception:
-        files = []
-    return {"data_dir": DATA_DIR, "files": files}
-
-@app.put("/admin/storage")
-def admin_set_storage(body: StorageIn, x_secret: Optional[str] = Header(None)):
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    new_dir = os.path.abspath((body.path or "").strip())
-    if not new_dir:
-        raise HTTPException(status_code=400, detail="Percorso non valido")
-
-    try:
-        os.makedirs(new_dir, exist_ok=True)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Impossibile creare cartella: {e}")
-
-    old_dir = DATA_DIR
-    if os.path.isdir(old_dir) and os.path.abspath(old_dir) != new_dir:
-        for name in ["records.json", "auth.json", "sent_emails.json", "email_settings.json", "email_templates.json"]:
-            src = os.path.join(old_dir, name)
-            dst = os.path.join(new_dir, name)
-            if os.path.exists(src) and not os.path.exists(dst):
-                try:
-                    shutil.copy2(src, dst)
-                except Exception:
-                    pass
-
-    s = _load_settings()
-    s["data_dir"] = new_dir
-    _save_json(SETTINGS_PATH, s)
-
-    _recompute_paths()
-    _ensure_email_files()
-    return {"ok": True, "data_dir": DATA_DIR}
-
-# =========================
-#  HELPERS RECORDS & CRUD
-# =========================
-
-def load_records() -> List[dict]:
-    data = _load_json(RECORDS_PATH, [])
-    changed = False
-    for r in data:
-        if not r.get("id"):
-            r["id"] = uuid.uuid4().hex; changed = True
-        if not r.get("created_at"):
-            r["created_at"] = _now_iso(); changed = True
-        if not r.get("updated_at"):
-            r["updated_at"] = r["created_at"]; changed = True
-        if not r.get("prossima_ricorrenza") and r.get("def_data"):
-            pr = _compute_first_ricorrenza(r.get("def_data"))
-            if pr:
-                r["prossima_ricorrenza"] = pr
-                changed = True
-    if changed:
-        _save_json(RECORDS_PATH, data)
-    return data
-
-def save_records(data: List[dict]):
-    _save_json(RECORDS_PATH, data)
-
-# --- AUTH ---
-@app.post("/auth/login", response_model=LoginResponse)
-def login(body: LoginRequest):
-    auth = _ensure_auth()
-    if _sha(body.password) != auth.get("password_sha"):
-        raise HTTPException(status_code=401, detail="Credenziali non valide")
-    return {"token": "damiano-token"}
-
-@app.post("/auth/change-password")
-def change_password(body: ChangePassword):
-    auth = _ensure_auth()
-    if _sha(body.old_password) != auth.get("password_sha"):
-        raise HTTPException(status_code=401, detail="Password attuale errata")
-    if not re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9])\S{8,}$", body.new_password):
-        raise HTTPException(status_code=400, detail="Password non conforme alla policy")
-    auth["password_sha"] = _sha(body.new_password)
-    _save_json(AUTH_PATH, auth)
-    return {"ok": True}
-
-# --- RECORDS CRUD ---
-@app.get("/records")
-def list_records():
-    return load_records()
-
-@app.get("/records/{rid}")
-def read_record(rid: str):
-    data = load_records()
-    for r in data:
-        if r["id"] == rid:
-            return r
-    raise HTTPException(status_code=404, detail="Not found")
-
-@app.post("/records")
-def create_record(rec: Record):
-    data = load_records()
-    now = _now_iso()
-
-    for r in data:
-        if (_norm(r.get("nome")) == _norm(rec.nome) and
-            _norm(r.get("cognome")) == _norm(rec.cognome) and
-            _norm(r.get("email")) == _norm(rec.email) and
-            _norm(r.get("telefono_numero")) == _norm(rec.telefono_numero) and
-            _norm(r.get("def_nome")) == _norm(rec.def_nome) and
-            _norm(r.get("def_cognome")) == _norm(rec.def_cognome)):
-            raise HTTPException(status_code=409, detail="Contatto duplicato")
-
-    obj = rec.model_dump()
-    obj["id"] = uuid.uuid4().hex
-    obj["created_at"] = now
-    obj["updated_at"] = now
-    if not obj.get("prossima_ricorrenza"):
-        obj["prossima_ricorrenza"] = _compute_first_ricorrenza(obj.get("def_data"))
-    data.append(obj)
-    save_records(data)
-    return obj
-
-@app.put("/records/{rid}")
-def update_record(rid: str, rec: Record):
-    data = load_records()
-    for i, r in enumerate(data):
-        if r["id"] == rid:
-            updated = r.copy()
-            incoming = rec.model_dump()
-            incoming["id"] = rid
-            updated.update(incoming)
-            if incoming.get("def_data") != r.get("def_data"):
-                updated["prossima_ricorrenza"] = _compute_first_ricorrenza(incoming.get("def_data"))
-            updated["updated_at"] = _now_iso()
-            data[i] = updated
-            save_records(data)
-            return updated
-    raise HTTPException(status_code=404, detail="Not found")
-
-# --- EMAILS (demo) ---
-@app.get("/emails/sent")
-def emails_sent():
-    sample = _load_json(EMAILS_PATH, [
-        {"to":"luca.rossi@example.com","subject":"Benvenuto","sent_at":"2025-08-01T10:00:00Z","status":"ok"},
-        {"to":"sara.bianchi@example.com","subject":"Aggiornamento","sent_at":"2025-08-05T15:30:00Z","status":"ok"},
-    ])
-    return {"emails": sample}
-
-# --- EMAIL SETTINGS/TEMPLATES ---
-@app.get("/api/email/settings")
-def get_email_settings():
-    s = _ensure_email_files() or load_email_settings()
-    s = load_email_settings()
-    return {
-        "subject": s.get("subject", ""),
-        "body": s.get("body", ""),
-        "subject_template_id": s.get("subject_template_id"),
-        "body_template_id": s.get("body_template_id"),
-        "updated_at": s.get("updated_at"),
+    // ===== STORAGE =====
+    async function readStorage(){
+      const base = getBase();
+      if(!base){ setStatus("Imposta il Backend URL", false); return; }
+      try{
+        const res = await fetch(`${base}/admin/storage`, {
+          headers: { "X-Secret": getSecret() }
+        });
+        if(!res.ok){
+          const err = await res.json().catch(()=>({detail: res.statusText}));
+          setStatus("Errore lettura storage: " + (err.detail||res.status), false);
+          return;
+        }
+        const data = await res.json();
+        renderStorage(data);
+        setStatus("Percorso letto correttamente", true);
+      }catch(e){
+        setStatus("Errore rete (lettura storage)", false);
+      }
     }
 
-def load_email_settings():
-    return _load_json(EMAIL_SETTINGS_PATH, {"subject": "", "body": ""})
+    function renderStorage(obj){
+      el("curDir").textContent = obj?.data_dir || "—";
+      const files = Array.isArray(obj?.files) ? obj.files : [];
+      el("curFiles").textContent = files.length ? files.join(", ") : "—";
+    }
 
-def save_email_settings(data: dict):
-    _save_json(EMAIL_SETTINGS_PATH, data)
+    async function setStorage(){
+      const base = getBase();
+      if(!base){ setStatus("Imposta il Backend URL", false); return; }
+      const secret = getSecret();
+      if(!secret){ setStatus("Inserisci X-Secret", false); return; }
 
-def load_email_templates():
-    return _load_json(EMAIL_TEMPLATES_PATH, {"subject": [], "body": []})
+      const path = prompt("Inserisci NUOVO percorso sul server (es. /tmp/damiano-data o /var/damiano-data):");
+      if(path === null) return; // annullato
+      const body = { path: String(path||"").trim() };
+      if(!body.path){ setStatus("Percorso non valido", false); return; }
 
-def save_email_templates(data: dict):
-    _save_json(EMAIL_TEMPLATES_PATH, data)
+      try{
+        const res = await fetch(`${base}/admin/storage`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Secret": secret
+          },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if(res.ok && data.ok){
+          renderStorage(data);
+          setStatus(`Percorso impostato: ${data.data_dir}`, true);
+        }else{
+          setStatus("Errore impostazione: " + (data.detail || JSON.stringify(data)), false);
+        }
+      }catch(e){
+        setStatus("Errore rete (impostazione storage)", false);
+      }
+    }
 
-@app.put("/api/email/settings")
-def update_email_settings(body: EmailSettingsIn):
-    s = load_email_settings()
-    if body.subject is not None: s["subject"] = body.subject
-    if body.body is not None: s["body"] = body.body
-    if body.subject_template_id is not None: s["subject_template_id"] = body.subject_template_id
-    if body.body_template_id is not None: s["body_template_id"] = body.body_template_id
-    s["updated_at"] = _now_iso()
-    save_email_settings(s)
-    return {"ok": True}
+    // ===== RECORDS =====
+    async function loadRecords(){
+      const base = getBase();
+      if(!base){ setStatus("Imposta il Backend URL", false); return; }
+      el("tbody").innerHTML = `<tr><td colspan="4"><small>Caricamento contatti…</small></td></tr>`;
+      try{
+        const res = await fetch(`${base}/records`);
+        const data = await res.json();
+        renderTable(data || []);
+        setStatus(`Caricati ${ (data||[]).length } contatti`, true);
+      }catch(e){
+        el("tbody").innerHTML = `<tr><td colspan="4"><small>Errore caricamento contatti</small></td></tr>`;
+        setStatus("Errore di rete nel recupero dei contatti", false);
+      }
+    }
 
-@app.get("/api/email/templates")
-def list_email_templates(type: str):
-    if type not in ("subject", "body"):
-        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
-    alltpl = load_email_templates()
-    return alltpl.get(type, [])
+    function renderTable(records){
+      const tbody = el("tbody");
+      if(!records.length){
+        tbody.innerHTML = `<tr><td colspan="4"><small>Nessun contatto presente</small></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = "";
+      for(const r of records){
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td><strong>${r.nome||""} ${r.cognome||""}</strong><br><small class="badge">${r.id}</small></td>
+          <td>${r.email||"<small class='err'>—</small>"}</td>
+          <td>${r.prossima_ricorrenza || "<small>—</small>"}</td>
+          <td class="right">
+            <button onclick="sendNow('${r.id}',0)">Invia ora</button>
+            <button class="ghost" onclick="sendNow('${r.id}',1)" title="Invia e avanza di 1 anno">Invia +1y</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
 
-@app.post("/api/email/templates")
-def create_email_template(tpl: EmailTemplateIn):
-    t = tpl.type
-    if t not in ("subject", "body"):
-        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
-    alltpl = load_email_templates()
-    new_item = {"id": uuid.uuid4().hex, "name": tpl.name, "content": tpl.content, "created_at": _now_iso()}
-    alltpl.setdefault(t, [])
-    alltpl[t].insert(0, new_item)
-    save_email_templates(alltpl)
-    s = load_email_settings()
-    if t == "subject":
-        s["subject"] = tpl.content
-        s["subject_template_id"] = new_item["id"]
-    else:
-        s["body"] = tpl.content
-        s["body_template_id"] = new_item["id"]
-    s["updated_at"] = _now_iso()
-    save_email_settings(s)
-    return {"id": new_item["id"], "ok": True}
+    async function sendNow(rid, advance){
+      const base = getBase();
+      const secret = getSecret();
+      if(!secret){ setStatus("Inserisci X-Secret", false); return; }
 
-@app.delete("/api/email/templates/{tid}")
-def delete_email_template(tid: str, type: str = Query(...)):
-    if type not in ("subject", "body"):
-        raise HTTPException(status_code=400, detail="type deve essere 'subject' o 'body'")
-    tpls = load_email_templates()
-    arr = tpls.get(type, [])
-    new_arr = [x for x in arr if x.get("id") != tid]
-    if len(new_arr) == len(arr):
-        raise HTTPException(status_code=404, detail="Template non trovato")
-    tpls[type] = new_arr
-    save_email_templates(tpls)
-    s = load_email_settings()
-    if type == "subject" and s.get("subject_template_id") == tid:
-        s["subject_template_id"] = None
-    if type == "body" and s.get("body_template_id") == tid:
-        s["body_template_id"] = None
-    save_email_settings(s)
-    return {"ok": True, "deleted_id": tid, "type": type}
+      if(!confirm("Vuoi inviare subito l'email per questo contatto?")) return;
+
+      try{
+        const res = await fetch(`${base}/admin/send-now/${rid}?advance=${advance}`, {
+          method: "POST",
+          headers: { "X-Secret": secret }
+        });
+        const data = await res.json();
+        if(res.ok && data.ok){
+          setStatus("✅ Email inviata correttamente", true);
+        }else{
+          setStatus("❌ Errore: " + (data.detail || JSON.stringify(data)), false);
+        }
+      }catch(e){
+        setStatus("❌ Errore di rete nell'invio", false);
+      }
+    }
+
+    // Auto-load all'avvio
+    loadRecords();
+    readStorage();
+  </script>
+</body>
+</html>
+
 
 
 
