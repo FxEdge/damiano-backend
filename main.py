@@ -213,90 +213,7 @@ app.add_middleware(
 def health():
     return {"status": "ok", "version": APP_VERSION, "time": _now_iso()}
 
-# === EMAIL LOG ADMIN ===
-@app.get("/admin/sent-emails")
-def get_sent_emails():
-    return _load_json(EMAILS_PATH, [])
-
-@app.delete("/admin/sent-emails")
-def clear_sent_emails():
-    _save_json(EMAILS_PATH, [])
-    return {"ok": True}
-
-# === SCHEDULER (SIMULAZIONE INVIO) ===
-@app.post("/admin/send-due-emails")
-def send_due_emails(x_secret: Optional[str] = Header(None)):
-    if x_secret != SCHEDULER_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    today = _today_rome_date()
-    records = load_records()
-    sent_rows = _load_sent()
-
-    settings = load_email_settings()
-    default_subject = settings.get("subject") or "In memoria"
-    default_body = settings.get("body") or "Un pensiero in questa ricorrenza."
-
-    processed, skipped, errors = [], [], []
-
-    for r in records:
-        try:
-            if r.get("sospendi_invio") is True:
-                skipped.append({"id": r.get("id"), "reason": "blocked_by_flag"})
-                continue
-            if not _due_today(r, today):
-                continue
-
-            to_list = _parse_recipients(r.get("email"))
-            if not to_list:
-                skipped.append({"id": r.get("id"), "reason": "no_email"})
-                continue
-
-            # priorità: per-record se presenti, altrimenti globali
-            subject_raw = r.get("oggetto") or default_subject
-            body_raw = r.get("corpo") or default_body
-            subject = _fill_placeholders(subject_raw, r)
-            body = _fill_placeholders(body_raw, r)
-
-            # --- simulazione invio ---
-            log_row = {
-                "record_id": r.get("id"),
-                "to": to_list,
-                "subject": subject,
-                "body_usato": body,
-                "nome": r.get("nome"),
-                "cognome": r.get("cognome"),
-                "def_nome": r.get("def_nome"),
-                "def_cognome": r.get("def_cognome"),
-                "scheduled_for": today.isoformat(),
-                "due_date": today.isoformat(),
-                "sent_at": _now_iso(),
-                "stato": "ok",
-                "errore": None,
-            }
-            sent_rows.append(log_row)
-            processed.append({"id": r.get("id"), "to": to_list})
-
-            # Avanza la prossima ricorrenza di +1 anno
-            pr = _parse_yyyy_mm_dd(r.get("prossima_ricorrenza"))
-            if pr:
-                r["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
-
-        except Exception as e:
-            errors.append({"id": r.get("id"), "error": str(e)})
-
-    # salva aggiornamenti (ricorrenze avanzate) + log
-    save_records(records)
-    _save_sent(sent_rows)
-
-    return {
-        "date": today.isoformat(),
-        "counts": {"processed": len(processed), "skipped": len(skipped), "errors": len(errors)},
-        "processed": processed,
-        "skipped": skipped,
-        "errors": errors,
-    }
-    # === TEST INVIO REALE (NEW) ===
+# === TEST INVIO REALE (NEW) ===
 @app.post("/admin/send-test-email")
 def send_test_email(to: str, x_secret: Optional[str] = Header(None)):
     if x_secret != SCHEDULER_SECRET:
@@ -308,8 +225,9 @@ def send_test_email(to: str, x_secret: Optional[str] = Header(None)):
         send_email(to, subject, html, plain_fallback="Ciao, questa è una mail di TEST dal backend Damiano.")
         return {"ok": True, "to": to}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore invio: {e}" )
-        # === GENERIC EMAIL SENDER (NEW) ===
+        raise HTTPException(status_code=500, detail=f"Errore invio: {e}")
+
+# === GENERIC EMAIL SENDER (NEW) ===
 class SendEmailIn(BaseModel):
     to: str         # uno o più indirizzi (separati da virgola o punto e virgola)
     subject: str
@@ -317,20 +235,16 @@ class SendEmailIn(BaseModel):
 
 @app.post("/send-email")
 def send_email_generic(body: SendEmailIn, x_secret: Optional[str] = Header(None)):
-    # Protezione con lo stesso segreto che usi per le altre rotte admin
     if x_secret != SCHEDULER_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # supporta più destinatari separati da virgola/; usando il tuo parser
     recipients = _parse_recipients(body.to)
     if not recipients:
         raise HTTPException(status_code=400, detail="Nessun indirizzo email valido in 'to'.")
 
     sent, failed = [], []
-
     for addr in recipients:
         try:
-            # HTML minimale + fallback testo
             html = f"<div style='font-family:system-ui; white-space:pre-wrap'>{body.message}</div>"
             send_email(addr, body.subject, html, plain_fallback=body.message)
             sent.append(addr)
@@ -339,6 +253,62 @@ def send_email_generic(body: SendEmailIn, x_secret: Optional[str] = Header(None)
 
     return {"ok": len(failed) == 0, "sent": sent, "failed": failed}
 
+# === INVIO IMMEDIATO DI UN SINGOLO CONTATTO (NEW) ===
+@app.post("/admin/send-now/{rid}")
+def send_now(rid: str, advance: int = 0, x_secret: Optional[str] = Header(None)):
+    """
+    Invia SUBITO l'email per il record 'rid', bypassando i controlli di ricorrenza.
+    Parametri: advance=1 per avanzare 'prossima_ricorrenza' di +1 anno (default 0).
+    """
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    records = load_records()
+    rec = next((x for x in records if x.get("id") == rid), None)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Record non trovato")
+
+    to_list = _parse_recipients(rec.get("email"))
+    if not to_list:
+        raise HTTPException(status_code=400, detail="Record senza email valida")
+
+    settings = load_email_settings()
+    subject_raw = rec.get("oggetto") or settings.get("subject") or "In memoria"
+    body_raw    = rec.get("corpo")   or settings.get("body")    or "Un pensiero in questa ricorrenza."
+    subject = _fill_placeholders(subject_raw, rec)
+    body    = _fill_placeholders(body_raw,  rec)
+
+    try:
+        send_email(to_list[0], subject, f"<div style='white-space:pre-wrap'>{body}</div>", plain_fallback=body)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Errore invio SMTP: {e}")
+
+    sent_rows = _load_sent()
+    today_iso = _today_rome_date().isoformat()
+    sent_rows.append({
+        "record_id": rec.get("id"),
+        "to": to_list,
+        "subject": subject,
+        "body_usato": body,
+        "nome": rec.get("nome"),
+        "cognome": rec.get("cognome"),
+        "def_nome": rec.get("def_nome"),
+        "def_cognome": rec.get("def_cognome"),
+        "scheduled_for": today_iso,
+        "due_date": today_iso,
+        "sent_at": _now_iso(),
+        "stato": "ok",
+        "errore": None,
+    })
+    _save_sent(sent_rows)
+
+    if int(advance) == 1:
+        pr = _parse_yyyy_mm_dd(rec.get("prossima_ricorrenza"))
+        if pr:
+            rec["prossima_ricorrenza"] = _add_years_safe(pr, 1).isoformat()
+            save_records(records)
+
+    return {"ok": True, "record_id": rid, "to": to_list, "advanced": int(advance) == 1}
 
 # === CATCH-UP HELPERS (NEW) ===
 def _already_sent(sent_log: list, record_id: Optional[str], due_date_iso: str) -> bool:
