@@ -309,6 +309,36 @@ def send_test_email(to: str, x_secret: Optional[str] = Header(None)):
         return {"ok": True, "to": to}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Errore invio: {e}" )
+        # === GENERIC EMAIL SENDER (NEW) ===
+class SendEmailIn(BaseModel):
+    to: str         # uno o più indirizzi (separati da virgola o punto e virgola)
+    subject: str
+    message: str    # testo semplice; verrà inviato anche come HTML minimale
+
+@app.post("/send-email")
+def send_email_generic(body: SendEmailIn, x_secret: Optional[str] = Header(None)):
+    # Protezione con lo stesso segreto che usi per le altre rotte admin
+    if x_secret != SCHEDULER_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # supporta più destinatari separati da virgola/; usando il tuo parser
+    recipients = _parse_recipients(body.to)
+    if not recipients:
+        raise HTTPException(status_code=400, detail="Nessun indirizzo email valido in 'to'.")
+
+    sent, failed = [], []
+
+    for addr in recipients:
+        try:
+            # HTML minimale + fallback testo
+            html = f"<div style='font-family:system-ui; white-space:pre-wrap'>{body.message}</div>"
+            send_email(addr, body.subject, html, plain_fallback=body.message)
+            sent.append(addr)
+        except Exception as e:
+            failed.append({"to": addr, "error": str(e)})
+
+    return {"ok": len(failed) == 0, "sent": sent, "failed": failed}
+
 
 # === CATCH-UP HELPERS (NEW) ===
 def _already_sent(sent_log: list, record_id: Optional[str], due_date_iso: str) -> bool:
