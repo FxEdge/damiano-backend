@@ -39,10 +39,8 @@ def get_data_dir() -> str:
     EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
     EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
     EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
-
-_recompute_paths()  # inizializza una volta
-
-
+# <<< CHIAMALA SOLO QUI, DOPO LA DEFINIZIONE >>>
+_recompute_paths()
 # --- CONFIG GLOBALI ---
 SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "demo")  # <-- cambia in produzione
 TZ_ROME = ZoneInfo("Europe/Rome")
@@ -86,9 +84,6 @@ def _recompute_paths():
     EMAILS_PATH = os.path.join(DATA_DIR, "sent_emails.json")
     EMAIL_SETTINGS_PATH = os.path.join(DATA_DIR, "email_settings.json")
     EMAIL_TEMPLATES_PATH = os.path.join(DATA_DIR, "email_templates.json")
-
-# >>> CHIAMA QUI, dopo la definizione della funzione <<<
-_recompute_paths()
 
 # === AUTH init (password demo) ===
 def _ensure_auth():
